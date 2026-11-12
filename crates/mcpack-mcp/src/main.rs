@@ -70,8 +70,12 @@ fn init_logging(default: &str) {
     let _ = tracing_subscriber::fmt().with_env_filter(filter).with_writer(std::io::stderr).with_target(false).try_init();
 }
 
-fn error_json(e: &mcpack_core::Error) -> Value {
-    json!({"error": {"code": e.code(), "message": e.to_string()}})
+fn error_json(tool: &str, e: &mcpack_core::Error) -> Value {
+    let mut err = json!({"code": e.code(), "message": e.to_string()});
+    if let Some(h) = tools::error_hint(tool, e) {
+        err["hint"] = json!(h);
+    }
+    json!({ "error": err })
 }
 
 #[tokio::main]
@@ -103,7 +107,7 @@ async fn main() {
                     }
                 }
                 Err(e) => {
-                    println!("{}", serde_json::to_string_pretty(&error_json(&e)).unwrap_or_default());
+                    println!("{}", serde_json::to_string_pretty(&error_json(tool, &e)).unwrap_or_default());
                     std::process::exit(1);
                 }
             }
@@ -111,8 +115,9 @@ async fn main() {
         "tools" => {
             let defs = tools::definitions();
             match args.get(1) {
-                Some(name) => match defs.iter().find(|d| d["name"] == name.as_str()) {
-                    Some(d) => println!("{}", serde_json::to_string_pretty(d).unwrap_or_default()),
+                // One tool: the full description (the list shows one sentence each).
+                Some(name) => match tools::all_definitions().into_iter().find(|d| d["name"] == name.as_str()) {
+                    Some(d) => println!("{}", serde_json::to_string_pretty(&d).unwrap_or_default()),
                     None => {
                         eprintln!("unknown tool '{name}'");
                         std::process::exit(2);
@@ -183,15 +188,33 @@ async fn dev(pack: &str, profile: &str) {
             String::new()
         }
     };
-    eprintln!("[mcpack] session {session} running; edit the pack to hot-reload (Ctrl+C stops the game)");
+    eprintln!("[mcpack] session {session} running; edit the pack to hot-reload (r + Enter restarts, Ctrl+C stops the game)");
     let mut events = l.subscribe();
     let mut seen_watch = 0u64;
     let mut current = session;
+    // Typed commands: "r" restarts the game (to apply changes that need a restart).
+    let (line_tx, mut lines) = tokio::sync::mpsc::unbounded_channel::<String>();
+    std::thread::spawn(move || {
+        for line in std::io::stdin().lines().map_while(Result::ok) {
+            if line_tx.send(line).is_err() {
+                break;
+            }
+        }
+    });
     loop {
         tokio::select! {
             ev = events.recv() => {
                 if let Ok(mcpack_core::events::Event::Log { text, .. }) = ev {
                     println!("{text}");
+                }
+            }
+            Some(line) = lines.recv() => {
+                if line.trim().eq_ignore_ascii_case("r") {
+                    eprintln!("[mcpack] restarting…");
+                    match tools::call(&l, "restart", json!({"session": current}), &cx).await {
+                        Ok(v) => current = v["session"]["id"].as_str().unwrap_or(&current).to_string(),
+                        Err(e) => eprintln!("[mcpack] restart failed: {e}"),
+                    }
                 }
             }
             _ = tokio::time::sleep(Duration::from_secs(1)) => {
@@ -204,6 +227,21 @@ async fn dev(pack: &str, profile: &str) {
                             }
                             eprintln!("[mcpack] hot reload: {} ({}){}", e.action, e.paths.join(", "),
                                 e.error.as_ref().map(|x| format!(" — error: {x}")).unwrap_or_default());
+                            if let Some(h) = &e.hotswap {
+                                eprintln!("[mcpack]   hot-swapped {} class(es) from {}", h.classes.len(), h.mods.join(", "));
+                                if !h.not_loaded.is_empty() {
+                                    eprintln!("[mcpack]   not loaded yet (old code until restart): {}", h.not_loaded.join(", "));
+                                }
+                            }
+                            if let Some(why) = &e.hotswap_failed {
+                                eprintln!("[mcpack]   not hot-swapped: {why}");
+                            }
+                            for r in &e.restart_reasons {
+                                eprintln!("[mcpack]   needs a restart: {r}");
+                            }
+                            if e.action == "restart_needed" {
+                                eprintln!("[mcpack]   type r + Enter to restart now (or set dev.restart = \"auto\")");
+                            }
                         }
                     }
                 }
@@ -234,12 +272,15 @@ async fn dev(pack: &str, profile: &str) {
 
 // ---------------------------------------------------------------- MCP server
 
-const INSTRUCTIONS: &str = "mcpack is a Minecraft launcher where every action is a tool. Typical loop: \
-pack_init → pack_add (dependencies are resolved automatically, including jar-declared ones) → check / doctor (auto-fixes problems) → \
-smoke_test (launches the game, waits for the title screen, optional world + commands + screenshot, returns a diagnosis on failure). \
-Tweak with pack_set (paths like jvm.memory, options.renderDistance, config.\"config/x.json\".key, profiles.<p>.*). \
-For live iteration: launch, then watch_start (hot reload: resources/datapacks live, mods/JVM via auto-restart); \
-inspect with logs, session_status, screenshot, game_command. Packs are directories containing pack.toml; prefer absolute paths.";
+const INSTRUCTIONS: &str = "mcpack is a Minecraft launcher where every action is a tool. \
+Start a task with `overview` (packs, running games, watches, pending restarts, recent errors, suggested next calls). \
+Tool descriptions here are one sentence: `help tool=<name>` gives the full description and arguments, `help` the tool map by group, \
+`help topic=workflows|pack-settings|hot-reload|testing|errors|results` a short guide. \
+Typical loop: pack_init → search_mods → pack_add (dependencies resolved automatically) → check / doctor → smoke_test. \
+Results are compact (long lists cut, nulls dropped); pass detail=true to any tool for everything. \
+Errors carry a code and often a hint with the next call to make. \
+Common arguments: pack = pack directory (or its pack.toml), prefer absolute paths; profile defaults to \"default\"; \
+session is optional and defaults to the running game of pack/profile (or the newest running game).";
 
 async fn serve() -> anyhow::Result<()> {
     let launcher = Launcher::new().map_err(|e| anyhow::anyhow!(e.to_string()))?;
@@ -313,7 +354,7 @@ async fn serve() -> anyhow::Result<()> {
                             json!({"content": content, "isError": false})
                         }
                         Err(e) => json!({
-                            "content": [{"type": "text", "text": serde_json::to_string_pretty(&error_json(&e)).unwrap_or_default()}],
+                            "content": [{"type": "text", "text": serde_json::to_string_pretty(&error_json(&name, &e)).unwrap_or_default()}],
                             "isError": true,
                         }),
                     };

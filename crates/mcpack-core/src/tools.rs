@@ -10,6 +10,7 @@ use std::time::{Duration, Instant};
 use serde_json::{json, Value};
 
 use crate::doctor::DoctorOptions;
+use crate::guide;
 use crate::error::{Error, Result};
 use crate::events::Event;
 use crate::launch::LaunchOptions;
@@ -39,7 +40,7 @@ impl CallContext {
 /// Read-only tools that UIs poll; not journaled when called by the app.
 const QUIET: &[&str] = &[
     "app_info", "config_get", "pack_list", "pack_show", "pack_get", "profile_show", "sessions", "session_status", "logs",
-    "activity", "watch_events", "watches", "minecraft_versions", "loader_versions", "agent_status",
+    "activity", "watch_events", "watches", "minecraft_versions", "loader_versions", "agent_status", "help", "overview",
 ];
 
 // ---------------------------------------------------------------- definitions
@@ -62,8 +63,35 @@ fn p_session() -> Value {
     json!({"type": "string", "description": "Session id. Optional: defaults to the running session of `pack`/`profile`, or the newest running session"})
 }
 
-/// JSON descriptions of every tool (name, description, inputSchema) — MCP `tools/list` format.
+/// What `tools/list` advertises: every tool except old aliases, with a one-sentence
+/// description each (the full text is one `help tool=<name>` call away). Keeps the list an
+/// agent loads up front small.
 pub fn definitions() -> Vec<Value> {
+    all_definitions()
+        .into_iter()
+        .filter(|d| !guide::ALIASES.iter().any(|(alias, _)| d["name"] == *alias))
+        .map(|mut d| {
+            let short = guide::summary(d["description"].as_str().unwrap_or_default());
+            d["description"] = json!(short);
+            // The pack/profile/session conventions are stated once in the server instructions
+            // instead of in every schema (they were most of the list's size).
+            if let Some(props) = d["inputSchema"]["properties"].as_object_mut() {
+                for k in ["pack", "profile", "session"] {
+                    if let Some(p) = props.get_mut(k).and_then(|p| p.as_object_mut()) {
+                        p.remove("description");
+                    }
+                }
+            }
+            if d["inputSchema"]["required"].as_array().is_some_and(|r| r.is_empty()) {
+                d["inputSchema"].as_object_mut().map(|s| s.remove("required"));
+            }
+            d
+        })
+        .collect()
+}
+
+/// Full JSON descriptions of every tool, aliases included (name, description, inputSchema).
+pub fn all_definitions() -> Vec<Value> {
     let sess = || json!({"session": p_session(), "pack": p_pack(), "profile": p_profile()});
     let with_sess = |extra: Value| {
         let mut base = sess();
@@ -91,6 +119,18 @@ pub fn definitions() -> Vec<Value> {
         "check": {"type": "boolean", "description": "after resolving, scan jars and auto-add dependencies they declare but the source did not (default true)"},
     });
     vec![
+        tool(
+            "overview",
+            "Start here: packs, running games (with in-game state), hot-reload watches and pending restarts, recent errors, and suggested next calls — in one call.",
+            json!({}),
+            &[],
+        ),
+        tool(
+            "help",
+            "Map of all tools by group. help tool=<name> gives a tool's full description and arguments; help topic=<name> gives a guide (workflows, pack-settings, hot-reload, testing, errors, results).",
+            json!({"tool": {"type": "string"}, "topic": {"type": "string", "enum": ["workflows", "pack-settings", "hot-reload", "testing", "errors", "results"]}}),
+            &[],
+        ),
         tool("app_info", "Launcher version, home directory, agent-supported Minecraft versions.", json!({}), &[]),
         tool("config_get", "Global launcher config (CurseForge key masked).", json!({}), &[]),
         tool(
@@ -128,7 +168,7 @@ pub fn definitions() -> Vec<Value> {
         tool("pack_get", "Read a pack.toml value by path (e.g. jvm.memory, profiles.test, mods[0]).", json!({"pack": p_pack(), "path": {"type": "string"}}), &["pack"]),
         tool(
             "pack_set",
-            "Set a pack.toml value by path, preserving comments. Paths: pack.minecraft, jvm.memory, jvm.args, options.renderDistance, config.\"config/x.json\".key, profiles.<p>.jvm.memory, profiles.<p>.disable, dev.config_reload ... Invalid results are rejected.",
+            "Set a pack.toml value by path, preserving comments. Paths: pack.minecraft, jvm.memory, jvm.args, options.renderDistance, config.\"config/x.json\".key, profiles.<p>.jvm.memory, profiles.<p>.disable, dev.config_reload (restart|resources|none), dev.restart (ask|auto), dev.hotswap (bool) ... Invalid results are rejected.",
             json!({"pack": p_pack(), "path": {"type": "string"}, "value": {"description": "any JSON value"}}),
             &["pack", "path", "value"],
         ),
@@ -233,7 +273,12 @@ pub fn definitions() -> Vec<Value> {
             with_sess(json!({"method": {"type": "string"}, "params": {"type": "object"}})),
             &["method"],
         ),
-        tool("watch_start", "Hot reload: watch the pack and apply changes live (resources/datapacks) or by restarting the game (mods/JVM/options).", json!({"pack": p_pack(), "profile": p_profile(), "session": p_session()}), &["pack"]),
+        tool(
+            "watch_start",
+            "Hot reload: watch the pack and apply each change to the running game: resource packs/datapacks (and configs with dev.config_reload=\"resources\") reload live; changed mod code is hot-swapped when dev.hotswap = true (method-body changes; takes effect from the next launch); anything else needs a restart, which happens automatically with dev.restart = \"auto\" or is reported as action `restart_needed` with `restart_reasons` (default \"ask\": call `restart` to apply). See watch_events.",
+            json!({"pack": p_pack(), "profile": p_profile(), "session": p_session()}),
+            &["pack"],
+        ),
         tool("watch_stop", "Stop a watch (by id, or by pack/profile).", json!({"watch": {"type": "string"}, "pack": p_pack(), "profile": p_profile()}), &[]),
         tool("watches", "Active watches.", json!({}), &[]),
         tool("watch_events", "Hot-reload events of a watch (since = last seq seen).", json!({"watch": {"type": "string"}, "since": {"type": "integer"}}), &["watch"]),
@@ -391,7 +436,16 @@ pub async fn call(l: &Launcher, tool: &str, args: Value, cx: &CallContext) -> Re
         let _ = registry::append_activity(&l.ctx.paths, &entry);
         l.ctx.events.emit(Event::Activity { entry });
     }
+    // Agents get compact results unless they ask for everything (see `help topic=results`).
+    if cx.origin == "mcp" && !b(&args, "detail").unwrap_or(false) {
+        return res.map(guide::compact);
+    }
     res
+}
+
+/// Hint for an error, for front ends that show one (the MCP server adds it to error results).
+pub fn error_hint(tool: &str, e: &Error) -> Option<String> {
+    guide::hint(tool, e)
 }
 
 fn rand_tag() -> u64 {
@@ -426,6 +480,8 @@ fn truncate_result(v: &Value) -> Value {
 async fn dispatch(l: &Launcher, tool: &str, a: &Value) -> Result<Value> {
     let secs = |k: &str, d: u64| Duration::from_secs(u(a, k).unwrap_or(d));
     match tool {
+        "help" => guide::help(a, &all_definitions()),
+        "overview" => overview(l).await,
         "app_info" => Ok(json!({
             "version": env!("CARGO_PKG_VERSION"),
             "home": l.home().display().to_string(),
@@ -726,6 +782,86 @@ async fn dispatch(l: &Launcher, tool: &str, a: &Value) -> Result<Value> {
     }
 }
 
+/// Everything an agent needs to get its bearings, with suggested next calls.
+async fn overview(l: &Launcher) -> Result<Value> {
+    let sessions: Vec<_> = l.sessions().into_iter().filter(|s| s.running).collect();
+    let watches = l.watches();
+    let mut next: Vec<String> = Vec::new();
+
+    let mut packs = Vec::new();
+    for dir in registry::known_packs(&l.ctx.paths) {
+        let Ok(info) = l.pack_show(Path::new(&dir)) else { continue };
+        let running: Vec<&str> = sessions.iter().filter(|s| s.pack_dir == info.dir).map(|s| s.id.as_str()).collect();
+        if info.lock_stale {
+            next.push(format!("resolve pack={} (pack.toml changed since the last resolve)", info.dir));
+        }
+        packs.push(json!({
+            "name": info.name,
+            "dir": info.dir,
+            "minecraft": info.minecraft,
+            "loader": info.loader,
+            "profiles": info.profiles,
+            "content": info.content.iter().filter(|c| c.top_level).count(),
+            "lock": if info.lock_stale { "stale" } else { "synced" },
+            "running": running,
+            "watch": watches.iter().any(|w| w.pack_dir == info.dir),
+        }));
+    }
+
+    let mut games = Vec::new();
+    for s in &sessions {
+        let game = match s.agent_port {
+            Some(_) => l.agent_call(&s.id, "status", json!({}), Duration::from_millis(1500)).await.ok().map(|st| {
+                json!({
+                    "title_screen": st["title_screen"], "in_world": st["in_world"], "world": st.get("level_id"),
+                    "loading": st["loading"], "screen": st.get("screen_title"), "fps": st["fps"],
+                })
+            }),
+            None => None,
+        };
+        games.push(json!({
+            "session": s.id, "pack": s.pack_dir, "profile": s.profile, "minecraft": s.minecraft,
+            "uptime_s": util::now_millis().saturating_sub(s.started_ms) / 1000,
+            "agent": game.unwrap_or_else(|| json!(if s.agent_port.is_some() { "starting" } else { "off" })),
+            "hotswap": s.hotswap_port.is_some(),
+        }));
+    }
+
+    let mut watch_list = Vec::new();
+    for w in &watches {
+        let last = l.watch_events(&w.id, None).ok().and_then(|e| e.into_iter().last());
+        if let Some(e) = last.as_ref().filter(|e| e.action == "restart_needed") {
+            if let Some(s) = sessions.iter().find(|s| s.pack_dir == w.pack_dir && s.profile == w.profile && s.started_ms <= e.at_ms) {
+                next.push(format!("restart session={} to apply: {}", s.id, e.restart_reasons.first().cloned().unwrap_or_default()));
+            }
+        }
+        watch_list.push(json!({
+            "watch": w.id, "pack": w.pack_dir, "profile": w.profile,
+            "last": last.map(|e| json!({"seq": e.seq, "action": e.action, "paths": e.paths, "restart_reasons": e.restart_reasons, "error": e.error})),
+        }));
+    }
+
+    let hour_ago = util::now_millis().saturating_sub(3_600_000);
+    let errors: Vec<Value> = registry::read_activity(&l.ctx.paths, 200, Some(hour_ago), None)
+        .into_iter()
+        .filter(|e| e.status == "error")
+        .take(5)
+        .map(|e| json!({"tool": e.tool, "pack": e.pack, "code": e.error_code, "error": e.error, "at_ms": e.ts}))
+        .collect();
+
+    if packs.is_empty() {
+        next.push("pack_init name=<name> minecraft=1.21.1 (or import_pack file=<.mrpack|.zip>) to create a pack".into());
+    } else if sessions.is_empty() {
+        next.push("launch pack=<dir> to play, or smoke_test pack=<dir> profile=test to check it starts".into());
+    }
+    if !errors.is_empty() {
+        next.push("diagnose pack=<dir> explains a failed launch; help topic=errors for the others".into());
+    }
+    next.push("help for the tool map; help topic=workflows for common sequences".into());
+
+    Ok(json!({"packs": packs, "games": games, "watches": watch_list, "recent_errors": errors, "next": next}))
+}
+
 /// Known packs in the shape the desktop UI uses.
 fn pack_list(l: &Launcher) -> Result<Value> {
     let watches = l.watches();
@@ -746,6 +882,9 @@ fn pack_list(l: &Launcher) -> Result<Value> {
             "pendingChanges": 0,
             "watch": watches.iter().any(|w| w.pack_dir == info.dir),
             "running": running,
+            "hotswap": info.pack.pointer("/dev/hotswap").and_then(|v| v.as_bool()).unwrap_or(false),
+            "restartPolicy": info.pack.pointer("/dev/restart").and_then(|v| v.as_str()).unwrap_or("ask"),
+            "configReload": info.pack.pointer("/dev/config_reload").and_then(|v| v.as_str()).unwrap_or("restart"),
         }));
     }
     Ok(Value::Array(out))
@@ -782,5 +921,118 @@ mod tests {
         assert_eq!(r["files_deleted"], true);
         assert!(!managed.exists());
         assert!(pack_list(&l).unwrap().as_array().unwrap().is_empty());
+    }
+
+    /// Every advertised tool is in exactly one help group, every group entry is a real tool, and
+    /// the advertised list is the short form.
+    #[test]
+    fn help_groups_cover_every_tool() {
+        let names: Vec<String> = definitions().iter().map(|d| d["name"].as_str().unwrap().to_string()).collect();
+        for n in &names {
+            let n_groups = guide::GROUPS.iter().filter(|(_, _, tools)| tools.contains(&n.as_str())).count();
+            assert_eq!(n_groups, 1, "tool {n} must be in exactly one help group");
+        }
+        for (_, _, tools) in guide::GROUPS {
+            for t in *tools {
+                assert!(names.iter().any(|n| n == t), "help group lists unknown tool {t}");
+            }
+        }
+        for (alias, target) in guide::ALIASES {
+            assert!(!names.iter().any(|n| n == alias), "alias {alias} must not be advertised");
+            assert!(names.iter().any(|n| n == target));
+        }
+        let advertised: usize = definitions().iter().map(|d| d["description"].as_str().unwrap().len()).sum();
+        let full: usize = all_definitions().iter().map(|d| d["description"].as_str().unwrap().len()).sum();
+        assert!(advertised < full, "tools/list should carry the short descriptions");
+    }
+
+    #[tokio::test]
+    async fn help_overview_and_compact_results_for_agents() {
+        let home = tempfile::tempdir().unwrap();
+        let l = Launcher::with_home(home.path()).unwrap();
+        let mcp = CallContext::new("mcp");
+
+        let map = call(&l, "help", json!({}), &mcp).await.unwrap();
+        assert!(map["groups"].as_array().unwrap().len() >= 5);
+        let one = call(&l, "help", json!({"tool": "pack_set"}), &mcp).await.unwrap();
+        assert!(one["description"].as_str().unwrap().contains("dev.hotswap"), "help tool= gives the full text");
+        assert!(one["arguments"]["path"].is_object());
+        let alias = call(&l, "help", json!({"tool": "export_mrpack"}), &mcp).await.unwrap();
+        assert_eq!(alias["tool"], "export_pack");
+        let topic = call(&l, "help", json!({"topic": "hot-reload"}), &mcp).await.unwrap();
+        assert!(topic["text"].as_str().unwrap().contains("restart_needed"));
+        let err = call(&l, "help", json!({"topic": "nope"}), &mcp).await.unwrap_err();
+        assert_eq!(err.code(), "not_found");
+
+        let empty = call(&l, "overview", json!({}), &mcp).await.unwrap();
+        assert!(empty["next"][0].as_str().unwrap().starts_with("pack_init"), "{empty}");
+        call(&l, "pack_init", json!({"name": "o", "minecraft": "1.21.1", "loader": "vanilla"}), &mcp).await.unwrap();
+        let one_pack = call(&l, "overview", json!({}), &mcp).await.unwrap();
+        assert_eq!(one_pack["packs"][0]["name"], "o");
+        assert!(one_pack["next"].as_array().unwrap().iter().any(|n| n.as_str().unwrap().starts_with("launch")));
+
+        // Hints for common mistakes.
+        let e = call(&l, "stop", json!({"session": "s-nope"}), &mcp).await.unwrap_err();
+        assert!(error_hint("stop", &e).unwrap().contains("overview"), "{e}");
+        let e = Error::Invalid("x".into());
+        assert_eq!(error_hint("pack_set", &e).unwrap(), "help tool=pack_set shows the arguments");
+    }
+
+    /// What the watcher relies on: why a restart is needed, holding mod jars back while a game
+    /// runs, and local mods being copies (rebuilding the source must not touch the instance).
+    #[tokio::test]
+    async fn sync_reports_restart_reasons_and_holds_mods() {
+        use std::io::Write;
+        let home = tempfile::tempdir().unwrap();
+        let l = Launcher::with_home(home.path()).unwrap();
+        let cx = CallContext::new("test");
+        let jar_at = |path: &Path, body: &[u8]| {
+            let mut z = zip::ZipWriter::new(std::fs::File::create(path).unwrap());
+            z.start_file("fabric.mod.json", zip::write::SimpleFileOptions::default()).unwrap();
+            z.write_all(br#"{"schemaVersion":1,"id":"devmod","version":"1.0.0"}"#).unwrap();
+            z.start_file("dev/Mod.class", zip::write::SimpleFileOptions::default()).unwrap();
+            z.write_all(body).unwrap();
+            z.finish().unwrap();
+        };
+        let dir = PathBuf::from(
+            call(&l, "pack_init", json!({"name": "dev", "minecraft": "1.21.1", "loader": "vanilla"}), &cx).await.unwrap()["dir"]
+                .as_str()
+                .unwrap(),
+        );
+        let src = home.path().join("devmod.jar");
+        jar_at(&src, b"v1");
+        call(&l, "pack_add", json!({"pack": dir.display().to_string(), "source": "file", "path": src.display().to_string(), "kind": "mod", "check": false}), &cx)
+            .await
+            .unwrap();
+
+        let pack = Pack::load(&dir).unwrap();
+        let (lock, _) = l.ensure_lock(&pack).await.unwrap();
+        let first = crate::instance::sync(&l.ctx, &pack, &lock, "default", Some(false), false).await.unwrap();
+        assert!(first.errors.is_empty(), "{:?}", first.errors);
+        let inst_jar = crate::paths::instance_dir(&dir, "default").join("mods").join("devmod.jar");
+        let original = std::fs::read(&inst_jar).unwrap();
+
+        // Rebuild the mod in place: the instance keeps its own copy.
+        jar_at(&src, b"v2");
+        assert_eq!(std::fs::read(&inst_jar).unwrap(), original, "local mods must be copied, not hard-linked");
+
+        let (lock, _) = l.ensure_lock(&pack).await.unwrap();
+        let plan = crate::instance::sync(&l.ctx, &pack, &lock, "default", Some(false), true).await.unwrap();
+        assert!(plan.restart_required);
+        assert_eq!(plan.mod_changes.len(), 1);
+        assert_eq!(plan.mod_changes[0].status, "updated");
+        assert!(plan.restart_reasons.iter().any(|r| r.starts_with("mods changed")), "{:?}", plan.restart_reasons);
+
+        // Held: nothing else needs a restart, the jar is untouched and still pending afterwards.
+        let held = crate::instance::sync_opts(&l.ctx, &pack, &lock, "default", Some(false), false, true).await.unwrap();
+        assert!(!held.restart_required, "{:?}", held.restart_reasons);
+        assert_eq!(held.held.len(), 1);
+        assert_eq!(std::fs::read(&inst_jar).unwrap(), original);
+        let again = crate::instance::sync(&l.ctx, &pack, &lock, "default", Some(false), true).await.unwrap();
+        assert_eq!(again.mod_changes.len(), 1, "a held change stays pending");
+
+        // A normal sync (e.g. at launch) applies it.
+        crate::instance::sync(&l.ctx, &pack, &lock, "default", Some(false), false).await.unwrap();
+        assert_ne!(std::fs::read(&inst_jar).unwrap(), original);
     }
 }

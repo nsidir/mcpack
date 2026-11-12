@@ -300,6 +300,30 @@ pub struct DevSettings {
     /// Do not apply automation-friendly options.txt defaults.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub no_automation_defaults: bool,
+    /// What the watcher does when a change needs a game restart.
+    #[serde(default, skip_serializing_if = "RestartPolicy::is_default")]
+    pub restart: RestartPolicy,
+    /// Launch with the JVM debug agent (local only) so the watcher can hot-swap changed mod
+    /// code into the running game instead of restarting. Only method-body changes can be
+    /// swapped on a standard JVM; takes effect at the next launch.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub hotswap: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum RestartPolicy {
+    /// Report that a restart is needed and leave the game running (the `restart` tool applies it).
+    #[default]
+    Ask,
+    /// Restart right away, rejoining the current world.
+    Auto,
+}
+
+impl RestartPolicy {
+    pub fn is_default(&self) -> bool {
+        *self == RestartPolicy::default()
+    }
 }
 
 impl DevSettings {

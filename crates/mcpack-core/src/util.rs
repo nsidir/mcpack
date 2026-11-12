@@ -87,6 +87,16 @@ pub fn link_or_copy(from: &Path, to: &Path) -> Result<()> {
     Ok(())
 }
 
+/// Replace `to` with an independent copy of `from` (no hard link).
+pub fn replace_with_copy(from: &Path, to: &Path) -> Result<()> {
+    ensure_parent(to)?;
+    if to.exists() {
+        std::fs::remove_file(to).ctx(to)?;
+    }
+    std::fs::copy(from, to).ctx(to)?;
+    Ok(())
+}
+
 /// Maven coordinate `group:artifact:version[:classifier][@ext]` → relative path.
 pub fn maven_path(name: &str) -> Result<String> {
     let (coord, ext) = match name.split_once('@') {

@@ -456,3 +456,22 @@ dialog.modal::backdrop { background: var(--backdrop); }
 .toast.ok svg.lead { color: var(--accent); }
 .toast.error svg.lead { color: var(--danger); }
 .toast .text { flex: 1; min-width: 0; user-select: text; }
+
+/* Hot reload panel */
+.setting-row .seg { flex: none; }
+.restart-banner { display: flex; align-items: flex-start; gap: 10px; margin: 0 14px 12px; padding: 10px 12px; border: 1px solid var(--warn); border-radius: var(--radius); background: var(--warn-soft); }
+.restart-banner > svg { color: var(--warn); margin-top: 2px; flex: none; }
+.restart-banner ul { margin: 4px 0 0; padding-left: 16px; color: var(--text-2); font-size: 12px; }
+.restart-banner .faint { margin-top: 4px; font-size: 12px; }
+.watch-feed { list-style: none; margin: 0; padding: 0; max-height: 340px; overflow-y: auto; }
+.watch-item + .watch-item { border-top: 1px solid var(--border); }
+.watch-row { display: flex; align-items: center; gap: 9px; width: 100%; padding: 7px 14px; background: none; border: 0; color: inherit; font: inherit; text-align: left; cursor: pointer; }
+.watch-row:hover { background: var(--hover); }
+.watch-row > svg { flex: none; }
+.watch-row time { flex: none; font-size: 11.5px; }
+.watch-detail { margin: 0; padding: 0 14px 9px 37px; list-style: none; display: grid; gap: 3px; color: var(--text-2); font-size: 12px; overflow-wrap: anywhere; }
+.tone-ok { color: var(--accent); }
+.tone-warn { color: var(--warn); }
+.tone-error { color: var(--danger); }
+.launch .btn.restart-needed { border-color: var(--warn); color: var(--warn); }
+.launch .btn.restart-needed:hover { background: var(--warn-soft); }

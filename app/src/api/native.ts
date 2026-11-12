@@ -147,8 +147,14 @@ export const nativeBackend: Backend = {
     await call("pack_delete", { pack, files });
   },
   async openUrl(url) {
-    if (!/^https?:\/\//i.test(url)) throw new BackendError("invalid", `not a web address: ${url}`);
-    await tauri().opener.openUrl(url);
+    // The opener capability (src-tauri/capabilities/default.json) only allows https pages.
+    if (!/^https:\/\//i.test(url)) throw new BackendError("invalid", `only https pages can be opened: ${url}`);
+    try {
+      await tauri().opener.openUrl(url);
+    } catch (err) {
+      // Plugin errors arrive as plain strings.
+      throw new BackendError("open_url", `could not open ${url}: ${err instanceof Error ? err.message : String(err)}`);
+    }
   },
   async removeContent(pack, slug) {
     await call("pack_remove", { pack, id: slug });
@@ -159,8 +165,21 @@ export const nativeBackend: Backend = {
   async resolve(pack) {
     await call("resolve", { pack });
   },
-  async setWatch(pack, on) {
-    await call(on ? "watch_start" : "watch_stop", { pack });
+  async setWatch(pack, on, profile) {
+    if (on) {
+      await call("watch_start", { pack, profile });
+      return;
+    }
+    // Stop every watch on this pack, whichever profile it was started for.
+    const norm = (p: string) => p.replace(/\\/g, "/").replace(/\/$/, "").toLowerCase();
+    const watches = await call<{ id: string; pack_dir: string }[]>("watches");
+    for (const w of watches.filter((x) => norm(x.pack_dir) === norm(pack))) await call("watch_stop", { watch: w.id });
+  },
+  async setDev(pack, { key, value }) {
+    await call("pack_set", { pack, path: `dev.${key}`, value });
+  },
+  async restart(pack, profile) {
+    await call("restart", { pack, profile });
   },
   async pickImportFile() {
     const r = await tauri().dialog.open({

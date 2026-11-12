@@ -145,6 +145,7 @@ impl Bridge {
                 "startedAt": st.started_ms,
                 "pid": st.pid,
                 "agentPort": st.agent_port,
+                "hotswapPort": st.hotswap_port,
                 "exitCode": Value::Null,
             })
         } else {
@@ -153,7 +154,7 @@ impl Bridge {
                 "status": if crashed { "crashed" } else { "stopped" },
                 "profile": st.profile,
                 "phase": Value::Null, "progress": Value::Null, "detail": Value::Null,
-                "pid": Value::Null, "agentPort": Value::Null, "startedAt": Value::Null,
+                "pid": Value::Null, "agentPort": Value::Null, "hotswapPort": Value::Null, "startedAt": Value::Null,
                 "exitCode": st.exit.as_ref().and_then(|e| e.code),
             })
         }
@@ -313,7 +314,10 @@ fn spawn_bridge(app: AppHandle, launcher: Launcher, bridge: Arc<Bridge>) {
                             }
                         }
                     }
-                    Event::Watch { .. } => {}
+                    Event::Watch { watch, event } => {
+                        let pack = event.pack.clone();
+                        let _ = app.emit(EVENT, json!({"type": "watch", "packId": pack, "watch": watch, "event": event}));
+                    }
                 }
             }
         });

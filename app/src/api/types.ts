@@ -17,6 +17,34 @@ export interface Pack {
   pendingChanges: number;
   /** File watcher (hot reload) active. */
   watch: boolean;
+  /** pack.toml `dev.hotswap`: launch with the debug agent so changed mod code can be hot-swapped. */
+  hotswap?: boolean;
+  /** pack.toml `dev.restart`: what the watcher does when a change needs a restart. */
+  restartPolicy?: RestartPolicy;
+  /** pack.toml `dev.config_reload`: how config changes reach a running game. */
+  configReload?: ConfigReload;
+}
+
+export type RestartPolicy = "ask" | "auto";
+export type ConfigReload = "restart" | "resources" | "none";
+export type DevSetting = { key: "hotswap"; value: boolean } | { key: "restart"; value: RestartPolicy } | { key: "config_reload"; value: ConfigReload };
+
+/** What the hot-reload watcher did with one batch of file changes (core `WatchEvent`). */
+export interface WatchEvent {
+  seq: number;
+  at_ms: number;
+  pack: string;
+  profile: string;
+  /** Changed files, relative to the pack (absolute when outside it). */
+  paths: string[];
+  action: "applying" | "no_change" | "synced" | "live_reload" | "hotswapped" | "restart_needed" | "restarted" | "error";
+  session?: string;
+  live_actions?: ("reload_resources" | "reload_datapacks")[];
+  restart_reasons?: string[];
+  hotswap?: { mods: string[]; classes: string[]; not_loaded?: string[]; pending_resources?: string[] };
+  hotswap_failed?: string;
+  error?: string;
+  sync?: { added?: string[]; removed?: string[]; updated?: string[]; config_changed?: string[]; overrides_changed?: string[]; held?: string[]; warnings?: string[] };
 }
 
 export type ContentKind = "mod" | "resourcepack" | "shaderpack" | "datapack";
@@ -114,6 +142,8 @@ export interface InstanceState {
   startedAt?: number;
   pid?: number;
   agentPort?: number;
+  /** Set when the session was launched with hot-swap (JVM debug agent port). */
+  hotswapPort?: number;
   exitCode?: number;
 }
 
@@ -178,6 +208,7 @@ export interface BackendInfo {
 
 export type BackendEvent =
   | { type: "packs"; packs: Pack[] }
+  | { type: "watch"; packId: string; event: WatchEvent }
   | { type: "content"; packId: string; content: ContentEntry[] }
   | { type: "instance"; packId: string; state: InstanceState }
   | { type: "log"; packId: string; lines: LogLine[] }
@@ -214,7 +245,11 @@ export interface Backend {
   removeContent(packId: string, slug: string): Promise<void>;
   updateContent(packId: string, slug: string): Promise<void>;
   resolve(packId: string): Promise<void>;
-  setWatch(packId: string, on: boolean): Promise<void>;
+  setWatch(packId: string, on: boolean, profile?: string): Promise<void>;
+  /** Change a pack.toml `[dev]` setting. */
+  setDev(packId: string, setting: DevSetting): Promise<void>;
+  /** Restart the running game with re-synced files, rejoining the current world. */
+  restart(packId: string, profile: string): Promise<void>;
   /** Ask for a modpack archive to import. null = cancelled. */
   pickImportFile(): Promise<string | null>;
   importPack(file: string): Promise<ImportResult>;

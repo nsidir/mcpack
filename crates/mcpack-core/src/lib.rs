@@ -18,6 +18,8 @@ pub mod config;
 pub mod diagnose;
 pub mod doctor;
 pub mod events;
+pub mod guide;
+pub mod hotswap;
 pub mod registry;
 pub mod tools;
 pub mod error;
@@ -612,6 +614,18 @@ impl Launcher {
             quick_play_world: opts.world.clone(),
         };
         let agent = if sync.agent { Some(AgentEndpoint::new()?) } else { None };
+        let mut sync = sync;
+        let hotswap = if pack.file.dev.hotswap {
+            match hotswap::endpoint_for(&inst.java) {
+                Ok(h) => Some(h),
+                Err(why) => {
+                    sync.warnings.push(format!("hot-swap unavailable: {why}"));
+                    None
+                }
+            }
+        } else {
+            None
+        };
         prog("launch", None, "starting the game".into());
         let session = launch::spawn(
             &inst,
@@ -624,6 +638,7 @@ impl Launcher {
             &eff.minecraft,
             self.ctx.events.clone(),
             self.ctx.paths.clone(),
+            hotswap,
         )?;
         self.sessions.lock().expect("sessions").insert(session.id.clone(), session.clone());
         if session.agent.is_some() {
@@ -868,6 +883,8 @@ fn status_from_record(r: &registry::SessionRecord) -> SessionStatus {
             (!running).then(|| launch::ExitInfo { code: None, at_ms: 0, crashed: false, crash_report: None, requested: false })
         }),
         agent_port: r.agent.as_ref().map(|a| a.port),
+        // Hot-swap is driven by the process that launched the game.
+        hotswap_port: None,
         ready_after_ms: r.ready_after_ms,
         log_lines: registry::read_log_file(Path::new(&r.log_path)).len() as u64,
     }

@@ -65,6 +65,29 @@ pub struct SyncReport {
     pub live_actions: Vec<LiveAction>,
     /// Resource packs (`file/<name>`) newly added that should be enabled live.
     pub enable_resourcepacks: Vec<String>,
+    /// Human-readable reasons for `restart_required` (empty when no restart is needed).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub restart_reasons: Vec<String>,
+    /// Mod jars that changed: what hot-swap compares.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub mod_changes: Vec<ModFileChange>,
+    /// Mod changes left for the next launch (`hold_mods`), e.g. after a hot-swap.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub held: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ModFileChange {
+    /// `mods/<filename>`
+    pub rel: String,
+    pub label: String,
+    /// added | updated | removed
+    pub status: String,
+    /// The file the instance should have (absent for `removed`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub src: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sha1: Option<String>,
 }
 
 impl SyncReport {
@@ -104,6 +127,9 @@ struct Desired {
     sha1: String,
     kind: Option<ModKind>,
     label: String,
+    /// A file of the user's (`source = "file"`): copied, never hard-linked, so rebuilding it
+    /// does not change (or get blocked by) the copy a running game has open.
+    local: bool,
 }
 
 pub async fn sync(
@@ -113,6 +139,21 @@ pub async fn sync(
     profile: &str,
     agent_override: Option<bool>,
     dry_run: bool,
+) -> Result<SyncReport> {
+    sync_opts(ctx, pack, lock, profile, agent_override, dry_run, false).await
+}
+
+/// [`sync`], optionally leaving mod jars untouched (`hold_mods`): a running game keeps its mod
+/// jars open (on Windows they cannot be replaced), so after a hot-swap the files are left as
+/// they are and recorded as still pending; the next sync (at launch) applies them.
+pub async fn sync_opts(
+    ctx: &Ctx,
+    pack: &Pack,
+    lock: &LockFile,
+    profile: &str,
+    agent_override: Option<bool>,
+    dry_run: bool,
+    hold_mods: bool,
 ) -> Result<SyncReport> {
     let eff = pack.effective(profile)?;
     let inst = instance_dir(&pack.dir, profile);
@@ -155,7 +196,8 @@ pub async fn sync(
         match locate_entry(ctx, pack, e, &mut report)? {
             Some((src, sha1)) => {
                 let rel = format!("{}/{}", e.kind.dir(), e.filename);
-                desired.push(Desired { rel, src: src.clone(), sha1: sha1.clone(), kind: Some(e.kind), label: label(e) });
+                let local = e.source == Source::File;
+                desired.push(Desired { rel, src: src.clone(), sha1: sha1.clone(), kind: Some(e.kind), label: label(e), local });
                 if e.kind == ModKind::Datapack {
                     for w in &worlds {
                         desired.push(Desired {
@@ -164,6 +206,7 @@ pub async fn sync(
                             sha1: sha1.clone(),
                             kind: Some(ModKind::Datapack),
                             label: format!("{} (world {w})", label(e)),
+                            local,
                         });
                     }
                 }
@@ -185,6 +228,7 @@ pub async fn sync(
                     sha1,
                     kind: Some(ModKind::Mod),
                     label: "mcpack-agent".into(),
+                    local: false,
                 });
                 report.agent = true;
             }
@@ -209,8 +253,27 @@ pub async fn sync(
             continue;
         }
         let existed = state.files.contains_key(&d.rel) || target.exists();
+        if d.kind == Some(ModKind::Mod) {
+            report.mod_changes.push(ModFileChange {
+                rel: d.rel.clone(),
+                label: d.label.clone(),
+                status: if existed { "updated" } else { "added" }.into(),
+                src: Some(d.src.display().to_string()),
+                sha1: Some(d.sha1.clone()),
+            });
+            if hold_mods {
+                // Keep the old record so the change is still pending next time.
+                if let Some(old) = state.files.get(&d.rel) {
+                    new_files.insert(d.rel.clone(), old.clone());
+                }
+                report.held.push(d.label.clone());
+                kinds_changed.insert(ModKind::Mod);
+                continue;
+            }
+        }
         if !dry_run {
-            if let Err(e) = util::link_or_copy(&d.src, &target) {
+            let placed = if d.local { util::replace_with_copy(&d.src, &target) } else { util::link_or_copy(&d.src, &target) };
+            if let Err(e) = placed {
                 report.errors.push(format!("{}: {e}", d.rel));
                 continue;
             }
@@ -234,6 +297,14 @@ pub async fn sync(
         let target = inst.join(rel);
         if let Some(k) = kind_of_rel(rel) {
             kinds_changed.insert(k);
+        }
+        if kind_of_rel(rel) == Some(ModKind::Mod) {
+            report.mod_changes.push(ModFileChange { rel: rel.clone(), label: rel.clone(), status: "removed".into(), src: None, sha1: None });
+            if hold_mods {
+                new_files.insert(rel.clone(), state.files[rel].clone());
+                report.held.push(rel.clone());
+                continue;
+            }
         }
         report.removed.push(rel.clone());
         if !dry_run && target.exists() {
@@ -316,11 +387,38 @@ pub async fn sync(
         .iter()
         .any(|r| !(r.starts_with("resourcepacks/") || r.contains("/datapacks/") || r.starts_with("datapacks/") || (r.starts_with("config/") && reload != ConfigReload::Restart)));
     let config_changed_any = !report.config_changed.is_empty() || report.overrides_changed.iter().any(|r| r.starts_with("config/"));
-    report.restart_required = kinds_changed.contains(&ModKind::Mod)
-        || report.launch_changed
-        || report.options_changed
-        || overrides_need_restart
-        || (config_changed_any && reload == ConfigReload::Restart);
+    let mods_changed = kinds_changed.contains(&ModKind::Mod) && !hold_mods;
+    report.restart_required =
+        mods_changed || report.launch_changed || report.options_changed || overrides_need_restart || (config_changed_any && reload == ConfigReload::Restart);
+    if mods_changed {
+        let names = |status: &str| report.mod_changes.iter().filter(|c| c.status == status).map(|c| c.label.clone()).collect::<Vec<_>>();
+        for (status, verb) in [("added", "added"), ("updated", "changed"), ("removed", "removed")] {
+            let n = names(status);
+            if !n.is_empty() {
+                report.restart_reasons.push(format!("mods {verb}: {}", list(&n)));
+            }
+        }
+    }
+    if report.launch_changed {
+        report.restart_reasons.push("launch settings changed (Minecraft/loader version, JVM settings or username)".into());
+    }
+    if report.options_changed {
+        report.restart_reasons.push("options.txt settings changed".into());
+    }
+    if overrides_need_restart {
+        let n: Vec<String> = report
+            .overrides_changed
+            .iter()
+            .filter(|r| !(r.starts_with("resourcepacks/") || r.contains("datapacks/") || (r.starts_with("config/") && reload != ConfigReload::Restart)))
+            .cloned()
+            .collect();
+        report.restart_reasons.push(format!("override files changed: {}", list(&n)));
+    }
+    if config_changed_any && reload == ConfigReload::Restart {
+        let mut n = report.config_changed.clone();
+        n.extend(report.overrides_changed.iter().filter(|r| r.starts_with("config/")).cloned());
+        report.restart_reasons.push(format!("configs changed: {} (most mods read configs at startup; set dev.config_reload = \"resources\" for mods that reload them)", list(&n)));
+    }
     if kinds_changed.contains(&ModKind::Resourcepack)
         || kinds_changed.contains(&ModKind::Shaderpack)
         || report.overrides_changed.iter().any(|r| r.starts_with("resourcepacks/"))
@@ -337,6 +435,16 @@ pub async fn sync(
         util::write_atomic(&state_path, serde_json::to_string_pretty(&new_state)?.as_bytes())?;
     }
     Ok(report)
+}
+
+/// "a, b, c" or "a, b, c and 4 more".
+fn list(items: &[String]) -> String {
+    const SHOW: usize = 4;
+    if items.len() <= SHOW {
+        items.join(", ")
+    } else {
+        format!("{} and {} more", items[..SHOW].join(", "), items.len() - SHOW)
+    }
 }
 
 fn label(e: &LockEntry) -> String {

@@ -10,6 +10,7 @@ import {
   type InstanceState,
   type LogLine,
   type Pack,
+  type WatchEvent,
 } from "./api";
 
 export type View = "pack" | "activity" | "settings";
@@ -39,6 +40,51 @@ export interface Shot {
 }
 
 const MAX_LOG = 2000;
+const MAX_WATCH = 40;
+
+const plural = (n: number, word: string) => `${n} ${word}${n === 1 ? "" : "s"}`;
+
+/** One-line summary of a watcher event (the change feed and toasts use it). */
+export function describeWatch(e: WatchEvent): string {
+  switch (e.action) {
+    case "applying":
+      return "Applying changes…";
+    case "no_change":
+      return "No effective change";
+    case "synced":
+      return e.session ? "Files updated" : "Files updated for the next launch";
+    case "live_reload": {
+      const what = (e.live_actions ?? []).map((a) => (a === "reload_resources" ? "resource packs" : "data packs"));
+      return `Reloaded ${what.join(" and ")} in the game`;
+    }
+    case "hotswapped": {
+      const h = e.hotswap;
+      return h ? `Hot-swapped ${plural(h.classes.length, "class")} from ${h.mods.join(", ")}` : "Hot-swapped mod code";
+    }
+    case "restart_needed":
+      return "Restart needed to apply";
+    case "restarted":
+      return "Restarted the game to apply";
+    case "error":
+      return e.error ?? "Hot reload failed";
+  }
+}
+
+function watchToast(e: WatchEvent): { kind: Toast["kind"]; text: string } | null {
+  switch (e.action) {
+    case "hotswapped":
+    case "live_reload":
+      return { kind: "ok", text: describeWatch(e) };
+    case "restart_needed":
+      return { kind: "info", text: `Restart needed: ${e.restart_reasons?.[0] ?? "changes need a restart"}` };
+    case "restarted":
+      return { kind: "info", text: `Restarted the game: ${e.restart_reasons?.[0] ?? "changes needed a restart"}` };
+    case "error":
+      return { kind: "error", text: `Hot reload: ${e.error ?? "failed"}` };
+    default:
+      return null;
+  }
+}
 
 const saved = <T,>(key: string, fallback: T): T => {
   try {
@@ -69,6 +115,8 @@ interface State {
   instances: Record<string, InstanceState | undefined>;
   logs: Record<string, LogLine[] | undefined>;
   agent: Record<string, AgentStatus | null | undefined>;
+  /** Hot-reload watcher events per pack, newest first. */
+  watchEvents: Record<string, WatchEvent[] | undefined>;
   repl: Record<string, ReplEntry[] | undefined>;
   shots: Record<string, Shot | undefined>;
   activity: ActivityEvent[];
@@ -113,6 +161,7 @@ export const useStore = create<State>((set, get) => ({
   instances: {},
   logs: {},
   agent: {},
+  watchEvents: {},
   repl: {},
   shots: {},
   activity: [],
@@ -134,6 +183,18 @@ export const useStore = create<State>((set, get) => ({
         case "instance":
           set((s) => ({ instances: { ...s.instances, [e.packId]: e.state } }));
           break;
+        case "watch": {
+          set((s) => {
+            const list = s.watchEvents[e.packId] ?? [];
+            // The outcome replaces its own "applying" entry (seq restarts with each watch).
+            const i = list.findIndex((x) => x.seq === e.event.seq && x.action === "applying");
+            const next = i >= 0 ? list.map((x, j) => (j === i ? e.event : x)) : [e.event, ...list];
+            return { watchEvents: { ...s.watchEvents, [e.packId]: next.slice(0, MAX_WATCH) } };
+          });
+          const note = watchToast(e.event);
+          if (note) get().toast(note.kind, note.text);
+          break;
+        }
         case "agent":
           set((s) => ({ agent: { ...s.agent, [e.packId]: e.status } }));
           break;
@@ -326,6 +387,23 @@ export async function importPack() {
   s.selectPack(r.pack.id);
   s.toast("ok", `Imported ${r.pack.name}`);
   if (r.warnings.length) s.toast("info", r.warnings.length === 1 ? r.warnings[0] : `${r.warnings[0]} (+${r.warnings.length - 1} more warnings, see Activity)`);
+}
+
+/** The latest watcher outcome says a restart is needed and the current session predates it. */
+export function pendingRestart(events: WatchEvent[] | undefined, instance: InstanceState | undefined): WatchEvent | null {
+  if (instance?.status !== "running") return null;
+  const last = events?.find((e) => e.action !== "applying" && e.action !== "no_change");
+  if (last?.action !== "restart_needed") return null;
+  return instance.startedAt != null && last.at_ms < instance.startedAt ? null : last;
+}
+
+/** Restart the running game with re-synced files, rejoining the current world. */
+export async function restartGame(pack: Pack) {
+  const s = useStore.getState();
+  const prev = s.instances[pack.id];
+  if (prev) setInstance(pack.id, { ...prev, status: "stopping" });
+  const ok = await s.run(backend.restart(pack.id, prev?.profile ?? profileOf(pack)).then(() => true));
+  if (!ok && prev && useStore.getState().instances[pack.id]?.status === "stopping") setInstance(pack.id, prev);
 }
 
 export function agentAction(pack: Pack, method: string, params: Record<string, unknown> = {}, ok?: string) {

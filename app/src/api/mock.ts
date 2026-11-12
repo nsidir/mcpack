@@ -15,6 +15,7 @@ import {
   type LogLevel,
   type Pack,
   type SearchHit,
+  type WatchEvent,
 } from "./types";
 
 const listeners = new Set<(e: BackendEvent) => void>();
@@ -425,6 +426,43 @@ function drawScreenshot(a: AgentStatus): string {
   return c.toDataURL("image/png");
 }
 
+// ------------------------------------------------------------- hot reload
+
+const watchTimers = new Map<string, number>();
+let watchSeq = 0;
+let scenario = 0;
+
+function watchEvent(pack: Pack, paths: string[], patch: Partial<WatchEvent>) {
+  const event: WatchEvent = { seq: ++watchSeq, at_ms: Date.now(), pack: pack.id, profile: session(pack.id).state.profile, paths, action: "synced", ...patch };
+  emit({ type: "watch", packId: pack.id, event });
+}
+
+/** Cycle through the kinds of change a real watcher reports. */
+function simulateChange(pack: Pack) {
+  const running = session(pack.id).state.status === "running";
+  const step = scenario++ % 3;
+  const restart = (reasons: string[], paths: string[], extra: Partial<WatchEvent> = {}) =>
+    watchEvent(pack, paths, pack.restartPolicy === "auto" ? { action: "restarted", restart_reasons: reasons, ...extra } : { action: "restart_needed", restart_reasons: reasons, ...extra });
+  if (step === 0) {
+    const paths = ["overrides/resourcepacks/ui-tweaks/assets/minecraft/textures/gui/widgets.png"];
+    watchEvent(pack, paths, { action: "applying" });
+    setTimeout(() => watchEvent(pack, paths, running ? { action: "live_reload", live_actions: ["reload_resources"] } : { action: "synced" }), 900);
+  } else if (step === 1) {
+    const paths = ["C:\\dev\\my-mod\\build\\libs\\my-mod-0.1.0.jar"];
+    if (!running) return watchEvent(pack, paths, { action: "synced", sync: { updated: ["my-mod 0.1.0"] } });
+    if (pack.hotswap)
+      return watchEvent(pack, paths, {
+        action: "hotswapped",
+        hotswap: { mods: ["my-mod 0.1.0"], classes: ["com.example.mymod.TickHandler", "com.example.mymod.Config"], not_loaded: [] },
+      });
+    restart(["mods changed: my-mod 0.1.0"], paths);
+  } else {
+    const paths = ["overrides/config/sodium-options.json"];
+    if (!running) return watchEvent(pack, paths, { action: "synced", sync: { config_changed: ["config/sodium-options.json"] } });
+    restart(["configs changed: config/sodium-options.json (most mods read configs at startup; set dev.config_reload = \"resources\" for mods that reload them)"], paths);
+  }
+}
+
 // ---------------------------------------------------------------- backend
 
 export const mockBackend: Backend = {
@@ -575,7 +613,30 @@ export const mockBackend: Backend = {
     return track(on ? "watch_start" : "watch_stop", packId, on ? "Watching pack for changes" : "Stopped watching", { pack: pack.path }, async () => {
       await sleep(150);
       pack.watch = on;
+      clearInterval(watchTimers.get(packId));
+      watchTimers.delete(packId);
+      if (on) watchTimers.set(packId, window.setInterval(() => simulateChange(pack), 7000));
       emit({ type: "packs", packs: packs.map((p) => ({ ...p })) });
+    });
+  },
+
+  setDev(packId, { key, value }) {
+    const pack = findPack(packId);
+    return track("pack_set", packId, `Set dev.${key} = ${JSON.stringify(value)}`, { path: `dev.${key}`, value }, async () => {
+      await sleep(150);
+      if (key === "hotswap") pack.hotswap = value;
+      else if (key === "restart") pack.restartPolicy = value;
+      else pack.configReload = value;
+      emit({ type: "packs", packs: packs.map((p) => ({ ...p })) });
+    });
+  },
+
+  restart(packId, profile) {
+    const pack = findPack(packId);
+    return track("restart", packId, "Restarted the game", { pack: pack.path, profile }, async () => {
+      endSession(packId, 0);
+      await runLaunch(pack, profile);
+      watchEvent(pack, ["mods/"], { action: "restarted", restart_reasons: ["restart requested"] });
     });
   },
 

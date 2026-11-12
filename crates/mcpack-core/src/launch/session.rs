@@ -1,6 +1,6 @@
 //! Running game sessions: process supervision + log capture.
 
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::path::PathBuf;
 use std::sync::Mutex;
 
@@ -10,6 +10,7 @@ use tokio::sync::{oneshot, watch};
 
 use crate::agent::AgentEndpoint;
 use crate::events::{log_level, Event, EventBus};
+use crate::hotswap::HotswapEndpoint;
 use crate::paths::Paths;
 use crate::registry::{self, SessionRecord};
 use crate::util;
@@ -78,6 +79,10 @@ pub struct Session {
     events: EventBus,
     paths: Paths,
     log_file: Mutex<Option<std::io::BufWriter<std::fs::File>>>,
+    /// JVM debug agent for hot-swapping mod code (launched with `dev.hotswap`).
+    pub hotswap: Option<HotswapEndpoint>,
+    /// Mod jars hot-swapped into this session: `mods/<file>` → sha1 of the version now running.
+    pub swapped: Mutex<HashMap<String, String>>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -92,6 +97,9 @@ pub struct SessionStatus {
     pub running: bool,
     pub exit: Option<ExitInfo>,
     pub agent_port: Option<u16>,
+    /// Debug-agent port when the session can hot-swap mod code.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub hotswap_port: Option<u16>,
     /// ms since start when the title screen was first observed.
     pub ready_after_ms: Option<u64>,
     pub log_lines: u64,
@@ -111,6 +119,7 @@ impl Session {
         kill_tx: oneshot::Sender<()>,
         events: EventBus,
         paths: Paths,
+        hotswap: Option<HotswapEndpoint>,
     ) -> Self {
         let (exit_tx, exit_rx) = watch::channel(None);
         let log_path = registry::session_log_path(&paths, &id);
@@ -135,6 +144,8 @@ impl Session {
             events,
             paths,
             log_file: Mutex::new(log_file),
+            hotswap,
+            swapped: Mutex::new(HashMap::new()),
         }
     }
 
@@ -300,6 +311,7 @@ impl Session {
             running: self.running(),
             exit: self.exit(),
             agent_port: self.agent.as_ref().map(|a| a.port),
+            hotswap_port: self.hotswap.as_ref().map(|h| h.port),
             ready_after_ms: self.ready_after_ms(),
             log_lines,
         }

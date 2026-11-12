@@ -14,7 +14,9 @@ same operations work from the **desktop app**, the **`mcpack` CLI**, scripts, or
 - **Testing**: `smoke_test` launches the game, waits for the title screen, can create a world,
   run commands and take a screenshot, and returns pass/fail with a diagnosis.
 - **Hot reload**: edit the pack while the game runs — resource packs/datapacks reload live,
-  mods/JVM/options changes restart the game and rejoin your world.
+  rebuilt mods can have their code hot-swapped into the running game (`dev.hotswap`), and
+  changes that need a restart are reported with the reason (or restart the game and rejoin
+  your world automatically with `dev.restart = "auto"`).
 - Fabric and Quilt on Minecraft 1.20.1 and 1.21.1 (in-game agent); vanilla on any version.
   Modrinth and CurseForge (needs an API key). Offline accounts.
 
@@ -85,7 +87,27 @@ path = "../mymod/build/libs/mymod.jar"
 agent = true
 options = { renderDistance = 4 }
 disable = ["iris"]
+
+[dev]                           # hot reload (watch_start / mcpack dev / the app's Hot reload switch)
+restart = "ask"                 # "ask" (report restart_needed) or "auto" (restart + rejoin the world)
+config_reload = "restart"       # or "resources" for mods that reload configs with F3+T, or "none"
+hotswap = true                  # launch with a local JVM debug port; rebuilt mods' changed method
+                                # bodies are swapped in without restarting
 ```
+
+### Hot reload: what applies how
+
+| Change | Running game |
+| --- | --- |
+| Resource packs, data packs (`overrides/`, content) | Reloaded live (`F3+T` / `/reload` via the agent) |
+| Configs | Restart, or a resource reload with `config_reload = "resources"` |
+| Rebuilt mod, code inside existing methods | Hot-swapped with `hotswap = true` (JDWP class redefinition) |
+| Rebuilt mod adding methods/fields/classes, mixins, `fabric.mod.json` | Restart (the JetBrains Runtime as `jvm.java` allows more to be hot-swapped) |
+| Mods added or removed, JVM/loader/Minecraft settings, `options.txt` | Restart: Fabric loads mods and applies mixins only at startup |
+
+Hot-swapped mod jars are written to the instance at the next launch (a running game keeps
+its mod jars open). Classes the game has not loaded yet and assets inside a swapped jar keep
+their old version until then.
 
 Files in `overrides/` (and `profiles/<name>/overrides/`) are copied into the instance.
 Instances live in `<pack>/run/<profile>`.

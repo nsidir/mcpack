@@ -1,8 +1,9 @@
-import { Bot, Boxes, Check, Copy, Gauge, LoaderCircle, Play, RefreshCw, Square, SquareTerminal, Trash2, Upload } from "lucide-react";
+import { Bot, Boxes, Check, Copy, Gauge, LoaderCircle, Play, RefreshCw, RotateCw, Square, SquareTerminal, Trash2, Upload } from "lucide-react";
 import { type CSSProperties, type ReactNode, useMemo, useState } from "react";
 import { backend, type InstanceState, type Pack, PHASES } from "../api";
-import { Badge, Button, copy, Dot, fmt, IconButton, Switch, useNow } from "../components/ui";
-import { launch, type PackTab, profileOf, setProfile, stateLabel, stop, useStore } from "../store";
+import { Badge, Button, copy, Dot, fmt, IconButton, useNow } from "../components/ui";
+import { launch, type PackTab, pendingRestart, profileOf, restartGame, setProfile, stateLabel, stop, useStore } from "../store";
+import { HotReloadPanel } from "./HotReload";
 import { AgentTab, ConsoleTab, ContentTab } from "./PackTabs";
 import { OriginBadge, StatusIcon } from "./Pages";
 
@@ -60,6 +61,8 @@ export function PackView({ pack }: { pack: Pack }) {
 /** The launch button doubles as the state display: Launch → Launching (phase) → Running → Stopping. */
 function LaunchControl({ pack, instance }: { pack: Pack; instance?: InstanceState }) {
   const now = useNow(1000, instance?.status === "running");
+  const events = useStore((s) => s.watchEvents[pack.id]);
+  const pending = pendingRestart(events, instance);
   const exportButton = (
     <>
       <IconButton label="Delete pack…" onClick={() => useStore.getState().open("delete-pack")}>
@@ -94,6 +97,12 @@ function LaunchControl({ pack, instance }: { pack: Pack; instance?: InstanceStat
     return (
       <div className="launch">
         {exportButton}
+        {pending && !stopping && (
+          <Button size="lg" className="restart-needed" title={(pending.restart_reasons ?? []).join("\n")} onClick={() => void restartGame(pack)}>
+            <RotateCw size={13} />
+            Restart to apply
+          </Button>
+        )}
         <Button size="lg" variant="primary" className="state" disabled role="status" title={`Profile ${instance.profile}${instance.pid ? ` · pid ${instance.pid}` : ""}`}>
           {stopping ? <LoaderCircle size={13} className="spin" /> : <Dot tone="ok" />}
           {stopping ? "Stopping…" : `Running · ${fmt.uptime(now - (instance.startedAt ?? now))}`}
@@ -291,14 +300,9 @@ function Overview({ pack, instance }: { pack: Pack; instance?: InstanceState }) 
                 </Button>
               )}
             </div>
-            <div className="setting-row">
-              <div className="grow">
-                <div className="label">Hot reload</div>
-                <div className="desc">Watch the pack folder and reload resources and data packs in the running game.</div>
-              </div>
-              <Switch checked={pack.watch} label="Hot reload" onChange={(on) => void run(backend.setWatch(pack.id, on))} />
-            </div>
           </section>
+
+          <HotReloadPanel pack={pack} instance={instance} />
 
           <section className="panel">
             <div className="panel-head">

@@ -28,10 +28,14 @@ pub fn spawn(
     minecraft: &str,
     events: crate::events::EventBus,
     paths: crate::paths::Paths,
+    hotswap: Option<crate::hotswap::HotswapEndpoint>,
 ) -> Result<Arc<Session>> {
     let mut params = params.clone();
     if let Some(a) = &agent {
         params.extra_jvm.extend(a.jvm_args());
+    }
+    if let Some(h) = &hotswap {
+        params.extra_jvm.extend(h.jvm_args());
     }
     let cmd = args::build(install, &params, platform);
     util::ensure_dir(&params.game_dir)?;
@@ -68,9 +72,17 @@ pub fn spawn(
         kill_tx,
         events,
         paths,
+        hotswap.clone(),
     ));
     session.announce_start();
     session.push_log(format!("[mcpack] launching {} with {}", minecraft, cmd.java.display()));
+    if let Some(h) = &hotswap {
+        session.push_log(format!(
+            "[mcpack] hot-swap on: debug agent at 127.0.0.1:{}{}",
+            h.port,
+            if h.enhanced { " (JetBrains Runtime: enhanced class redefinition)" } else { " (method-body changes)" }
+        ));
+    }
 
     if let Some(out) = child.stdout.take() {
         tokio::spawn(session::pump(session.clone(), out, ""));
