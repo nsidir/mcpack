@@ -1,0 +1,32 @@
+[package]
+name = "mcpack-app"
+description = "Desktop shell for mcpack"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+# Same toolchain as the launcher workspace; resolver 3 picks dependency versions that support it.
+rust-version = "1.87"
+
+# Standalone crate (not in the launcher workspace) so the launcher builds without Tauri.
+[workspace]
+resolver = "3"
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+# Native open/save file pickers for modpack import/export.
+tauri-plugin-dialog = "2"
+mcpack-core = { path = "../../crates/mcpack-core" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["sync", "time"] }
+
+[profile.release]
+lto = "thin"
+strip = true
+
+# Tauri dev builds produce very large PDBs that can trip MSVC (LNK1318); skip debug info.
+[profile.dev]
+debug = false

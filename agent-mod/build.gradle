@@ -1,0 +1,40 @@
+plugins {
+	id 'fabric-loom' version "${loom_version}" apply false
+}
+
+subprojects {
+	apply plugin: 'fabric-loom'
+
+	def mcVersion = project.name.substring(2) // "mc1.21.1" -> "1.21.1"
+	version = "${mod_version}+${mcVersion}"
+	group = 'dev.mcpack'
+	base { archivesName = 'mcpack-agent' }
+
+	sourceSets.main.java.srcDirs += rootProject.file('common/src/main/java')
+
+	dependencies {
+		minecraft "com.mojang:minecraft:${mcVersion}"
+		mappings loom.officialMojangMappings()
+		modImplementation "net.fabricmc:fabric-loader:${rootProject.loader_version}"
+	}
+
+	processResources {
+		def v = project.version
+		inputs.property 'version', v
+		filesMatching('fabric.mod.json') { expand 'version': v }
+	}
+
+	tasks.withType(JavaCompile).configureEach { it.options.release = 17 }
+	java {
+		sourceCompatibility = JavaVersion.VERSION_17
+		targetCompatibility = JavaVersion.VERSION_17
+	}
+
+	// Copy the remapped jar into agent-mod/dist so the Rust launcher can embed it.
+	tasks.register('dist', Copy) {
+		dependsOn remapJar
+		from remapJar.archiveFile
+		into rootProject.file('dist')
+		rename { "mcpack-agent-${mcVersion}.jar" }
+	}
+}

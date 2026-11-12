@@ -1,0 +1,32 @@
+# Example: a light performance pack for 1.21.1 with a testing profile.
+[pack]
+name = "example-perf"
+minecraft = "1.21.1"
+loader = { kind = "fabric", version = "latest" }
+
+[jvm]
+memory = "4G"
+
+[options]
+renderDistance = 12
+guiScale = 2
+
+[config."config/sodium-options.json"]
+"quality.weather_quality" = "FAST"
+
+[[mods]]
+id = "sodium"
+
+[[mods]]
+id = "lithium"
+
+[[mods]]
+id = "modmenu"
+
+[[mods]]
+id = "faithful-32x"
+kind = "resourcepack"
+
+[profiles.test]
+agent = true
+options = { renderDistance = 4, simulationDistance = 5, maxFps = 60 }

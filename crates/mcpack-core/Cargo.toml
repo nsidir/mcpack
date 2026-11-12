@@ -1,0 +1,30 @@
+[package]
+name = "mcpack-core"
+description = "Automation-first Minecraft launcher library: declarative packs, Modrinth/CurseForge resolution, launch, test, hot reload."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+tokio.workspace = true
+reqwest.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+toml.workspace = true
+toml_edit.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+futures.workspace = true
+sha1.workspace = true
+sha2.workspace = true
+md-5.workspace = true
+hex.workspace = true
+zip.workspace = true
+notify.workspace = true
+dirs.workspace = true
+regex.workspace = true
+rand.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

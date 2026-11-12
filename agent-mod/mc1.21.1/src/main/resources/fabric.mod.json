@@ -1,0 +1,11 @@
+{
+  "schemaVersion": 1,
+  "id": "mcpack-agent",
+  "version": "${version}",
+  "name": "mcpack agent",
+  "description": "Automation bridge for the mcpack launcher. Inactive unless launched by mcpack.",
+  "license": "MIT",
+  "environment": "client",
+  "entrypoints": { "client": ["dev.mcpack.agent.McpackAgent"] },
+  "depends": { "fabricloader": ">=0.14.0", "minecraft": "~1.21.1", "java": ">=17" }
+}

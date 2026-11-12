@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "mcpack": {
+      "command": "./target/release/mcpack",
+      "args": ["serve"]
+    }
+  }
+}

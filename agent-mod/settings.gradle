@@ -1,0 +1,9 @@
+pluginManagement {
+	repositories {
+		maven { name = 'Fabric'; url = 'https://maven.fabricmc.net/' }
+		mavenCentral()
+		gradlePluginPortal()
+	}
+}
+rootProject.name = 'mcpack-agent'
+include 'mc1.20.1', 'mc1.21.1'

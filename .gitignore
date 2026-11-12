@@ -1,0 +1,8 @@
+/target
+**/run/
+agent-mod/.gradle/
+agent-mod/build/
+agent-mod/*/build/
+agent-mod/*/run/
+*.log
+*.stackdump
