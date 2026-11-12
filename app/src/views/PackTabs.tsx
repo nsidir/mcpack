@@ -1,8 +1,8 @@
-import { ArrowDownToLine, Bot, Boxes, Camera, CircleArrowUp, Copy, Globe, LoaderCircle, LogOut, Play, Plus, RefreshCw, Search, SquareTerminal, Trash2 } from "lucide-react";
+import { ArrowDownToLine, Bot, Boxes, Camera, ChevronDown, CircleArrowUp, Copy, ExternalLink, Globe, LoaderCircle, LogOut, Play, Plus, RefreshCw, Search, SquareTerminal, Trash2 } from "lucide-react";
 import { type ReactNode, useEffect, useMemo, useRef, useState } from "react";
 import { backend, type ContentKind, type Pack } from "../api";
 import { Badge, Button, copy, Empty, fmt, IconButton, Segmented } from "../components/ui";
-import { agentAction, isActive, launch, useStore } from "../store";
+import { agentAction, isActive, launch, openUrl, pageUrl, useStore } from "../store";
 
 // ------------------------------------------------------------------ content
 
@@ -11,7 +11,7 @@ const KIND_LABEL: Record<ContentKind, string> = { mod: "Mod", resourcepack: "Res
 
 export function ContentTab({ pack }: { pack: Pack }) {
   const content = useStore((s) => s.content[pack.id]);
-  const { open, run } = useStore.getState();
+  const { open, run, pickVersion } = useStore.getState();
   const [query, setQuery] = useState("");
   const [kind, setKind] = useState<KindFilter>("all");
   const [busy, setBusy] = useState<string | null>(null);
@@ -101,7 +101,14 @@ export function ContentTab({ pack }: { pack: Pack }) {
                 {KIND_LABEL[c.kind]}
               </span>
               <div className="row" role="cell" style={{ minWidth: 0 }}>
-                <span className="mono muted truncate">{c.version}</span>
+                {c.source === "local" ? (
+                  <span className="mono muted truncate">{c.version}</span>
+                ) : (
+                  <button type="button" className="version-btn" title="Choose a version" disabled={busy !== null} onClick={() => pickVersion(c)}>
+                    <span className="mono truncate">{c.version}</span>
+                    <ChevronDown size={12} />
+                  </button>
+                )}
                 {c.update && (
                   <button
                     type="button"
@@ -121,6 +128,11 @@ export function ContentTab({ pack }: { pack: Pack }) {
                 {fmt.bytes(c.size)}
               </span>
               <div className="actions" role="cell">
+                {pageUrl(c) && (
+                  <IconButton size="sm" label={`Open ${c.name} project page`} onClick={() => openUrl(pageUrl(c)!)}>
+                    <ExternalLink size={13} />
+                  </IconButton>
+                )}
                 <IconButton
                   size="sm"
                   variant="danger"

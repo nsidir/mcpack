@@ -26,7 +26,7 @@ const EVENT: &str = "mcpack://event";
 /// Tools whose success changes a pack's content or list entry.
 const MUTATING: &[&str] = &[
     "pack_init", "pack_add", "pack_remove", "pack_set", "pack_unset", "resolve", "update", "doctor", "sync", "import_mrpack",
-    "pack_forget", "watch_start", "watch_stop", "hot_apply", "import_pack",
+    "pack_forget", "pack_delete", "watch_start", "watch_stop", "hot_apply", "import_pack",
 ];
 
 struct AppState {
@@ -433,6 +433,7 @@ fn main() {
     tauri::Builder::default()
         .manage(AppState { launcher: launcher.clone(), bridge: bridge.clone() })
         .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_opener::init())
         .invoke_handler(tauri::generate_handler![mcpack_call, mcpack_instances])
         .setup(move |app| {
             spawn_bridge(app.handle().clone(), launcher.clone(), bridge.clone());

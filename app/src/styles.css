@@ -419,7 +419,28 @@ dialog.modal::backdrop { background: var(--backdrop); }
 .pal-empty { padding: 28px; text-align: center; color: var(--text-3); }
 
 .hit { display: flex; align-items: center; gap: 12px; padding: 9px 18px; }
-.hit + .hit { border-top: 1px solid var(--border); }
+.hit-wrap + .hit-wrap { border-top: 1px solid var(--border); }
+.hit-more { display: grid; gap: 8px; padding: 2px 18px 12px 54px; }
+.hit-more p { color: var(--text-2); font-size: 12.5px; }
+.link { padding: 0; background: none; border: 0; color: var(--accent); font: inherit; cursor: pointer; }
+.link:hover { text-decoration: underline; }
+.versions { display: grid; max-height: 232px; overflow-y: auto; border: 1px solid var(--border); border-radius: var(--radius); background: var(--bg); }
+.version { display: flex; align-items: center; gap: 8px; min-height: 32px; padding: 3px 8px 3px 10px; font-size: 12px; }
+.version + .version { border-top: 1px solid var(--border); }
+.version .mono { max-width: 46%; }
+.version .date { width: 76px; text-align: right; flex: none; font-variant-numeric: tabular-nums; }
+.versions-note { padding: 10px 0; color: var(--text-3); font-size: 12px; }
+.versions-note.error { color: var(--danger); }
+.version-btn { display: inline-flex; align-items: center; gap: 4px; min-width: 0; height: 22px; padding: 0 5px; margin-left: -5px; background: none; border: 1px solid transparent; border-radius: 4px; color: var(--text-2); cursor: pointer; }
+.version-btn:hover { border-color: var(--border-strong); color: var(--text); }
+.version-btn svg { flex: none; opacity: 0.6; }
+.check { display: flex; align-items: flex-start; gap: 9px; cursor: pointer; }
+.check input { margin-top: 3px; accent-color: var(--danger); }
+.check.disabled { cursor: default; color: var(--text-3); }
+.check .desc { display: block; margin-top: 2px; color: var(--text-3); font-size: 12px; overflow-wrap: anywhere; }
+.warn-text { color: var(--warn); font-weight: 500; }
+.btn.danger.solid { background: var(--danger); border-color: transparent; color: #fff; font-weight: 600; }
+.btn.danger.solid:hover { background: var(--danger); filter: brightness(1.1); color: #fff; }
 .hit:hover { background: var(--hover); }
 .hit .desc { color: var(--text-2); font-size: 12px; }
 .hits { overflow-y: auto; min-height: 220px; border-top: 1px solid var(--border); }

@@ -118,6 +118,12 @@ pub fn definitions() -> Vec<Value> {
             &["minecraft"],
         ),
         tool("pack_forget", "Remove a pack from the known-packs list (files are kept).", json!({"pack": p_pack()}), &["pack"]),
+        tool(
+            "pack_delete",
+            "Delete a pack: stops its watches and removes it from the known-packs list. files=true also deletes the pack folder (worlds, configs, everything) — only for packs inside <home>/packs. Refused while the game is running for the pack.",
+            json!({"pack": p_pack(), "files": {"type": "boolean", "description": "also delete the pack folder (default false)"}}),
+            &["pack"],
+        ),
         tool("pack_show", "Pack summary: settings, profiles, resolved content (with dependency flags), lock state, running sessions.", json!({"pack": p_pack()}), &["pack"]),
         tool("pack_get", "Read a pack.toml value by path (e.g. jvm.memory, profiles.test, mods[0]).", json!({"pack": p_pack(), "path": {"type": "string"}}), &["pack"]),
         tool(
@@ -363,7 +369,8 @@ pub async fn call(l: &Launcher, tool: &str, args: Value, cx: &CallContext) -> Re
         l.ctx.events.emit(Event::Activity { entry: entry.clone() });
     }
     let res = dispatch(l, tool, &args).await;
-    if let (Ok(_), Some(p)) = (&res, &pack) {
+    // Any successful call on a pack registers it — except the calls whose point is to unregister it.
+    if let (Ok(_), Some(p), false) = (&res, &pack, matches!(tool, "pack_forget" | "pack_delete")) {
         if Path::new(p).join(crate::pack::PACK_FILE).exists() {
             registry::remember_pack(&l.ctx.paths, Path::new(p));
         }
@@ -460,6 +467,39 @@ async fn dispatch(l: &Launcher, tool: &str, a: &Value) -> Result<Value> {
             let d = pack_arg(a)?;
             let d = std::path::absolute(&d).unwrap_or(d);
             Ok(json!({"removed": registry::forget_pack(&l.ctx.paths, &d.display().to_string())}))
+        }
+        "pack_delete" => {
+            let d = pack_arg(a)?;
+            let d = std::path::absolute(&d).unwrap_or(d);
+            let key = d.display().to_string();
+            if l.sessions().iter().any(|s| s.running && s.pack_dir == key) {
+                return Err(Error::Invalid("the game is running for this pack; stop it first".into()));
+            }
+            let files = b(a, "files").unwrap_or(false);
+            if files {
+                // Only folders the launcher created itself are deleted; a pack that lives in
+                // someone's project directory is just forgotten.
+                let root = l.home().join("packs");
+                let root = std::path::absolute(&root).unwrap_or(root);
+                if !(d.starts_with(&root) && d != root) {
+                    return Err(Error::Invalid(format!(
+                        "{} is outside {}; it can be removed from the list (files=false) but its folder is not deleted",
+                        d.display(),
+                        root.display()
+                    )));
+                }
+                if !d.join(crate::pack::PACK_FILE).exists() {
+                    return Err(Error::NotFound(format!("no pack in {}", d.display())));
+                }
+            }
+            for w in l.watches().into_iter().filter(|w| w.pack_dir == key) {
+                let _ = l.watch_stop(&w.id);
+            }
+            if files {
+                std::fs::remove_dir_all(&d).map_err(|e| Error::io(&d, e))?;
+            }
+            let removed = registry::forget_pack(&l.ctx.paths, &key);
+            Ok(json!({"removed": removed, "files_deleted": files, "dir": key}))
         }
         "pack_show" => to(l.pack_show(&pack_arg(a)?)?),
         "pack_get" => l.pack_get(&pack_arg(a)?, &s(a, "path").unwrap_or_default()),
@@ -709,4 +749,38 @@ fn pack_list(l: &Launcher) -> Result<Value> {
         }));
     }
     Ok(Value::Array(out))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn pack_delete_removes_managed_folders_and_only_forgets_others() {
+        let home = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let l = Launcher::with_home(home.path()).unwrap();
+        let cx = CallContext::new("test");
+
+        let managed = call(&l, "pack_init", json!({"name": "doomed", "minecraft": "1.21.1"}), &cx).await.unwrap();
+        let managed = PathBuf::from(managed["dir"].as_str().unwrap());
+        let other = call(&l, "pack_init", json!({"dir": outside.path().display().to_string(), "name": "mine", "minecraft": "1.21.1"}), &cx).await.unwrap();
+        let other = PathBuf::from(other["dir"].as_str().unwrap());
+        assert_eq!(pack_list(&l).unwrap().as_array().unwrap().len(), 2);
+
+        // A pack outside <home>/packs never has its folder deleted.
+        let err = call(&l, "pack_delete", json!({"pack": other.display().to_string(), "files": true}), &cx).await.unwrap_err();
+        assert_eq!(err.code(), "invalid");
+        assert!(other.join(crate::pack::PACK_FILE).exists());
+        assert_eq!(pack_list(&l).unwrap().as_array().unwrap().len(), 2);
+
+        let r = call(&l, "pack_delete", json!({"pack": other.display().to_string()}), &cx).await.unwrap();
+        assert_eq!(r["removed"], true);
+        assert!(other.join(crate::pack::PACK_FILE).exists(), "files=false keeps the folder");
+
+        let r = call(&l, "pack_delete", json!({"pack": managed.display().to_string(), "files": true}), &cx).await.unwrap();
+        assert_eq!(r["files_deleted"], true);
+        assert!(!managed.exists());
+        assert!(pack_list(&l).unwrap().as_array().unwrap().is_empty());
+    }
 }

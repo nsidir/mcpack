@@ -4,8 +4,11 @@ import {
   Bot,
   Boxes,
   Camera,
+  ChevronDown,
   CornerDownLeft,
   Download,
+  ExternalLink,
+  Trash2,
   Gauge,
   LoaderCircle,
   Monitor,
@@ -21,9 +24,10 @@ import {
   Sun,
   Upload,
 } from "lucide-react";
-import { backend, type ContentKind, type Loader, PACK_FORMATS, type PackFormat, type SearchHit } from "../api";
-import { agentAction, importPack, isActive, launch, profileOf, stop, usePack, useStore } from "../store";
-import { Badge, Button, fmt, Kbd, Modal, Segmented } from "./ui";
+import { backend, type ContentKind, type Loader, PACK_FORMATS, type PackFormat, type SearchHit, type VersionSummary } from "../api";
+import { agentAction, importPack, isActive, launch, openUrl, pageUrl, profileOf, stop, usePack, useStore } from "../store";
+import { CustomContentForm, versionArg, VersionList } from "./ContentDialogs";
+import { Badge, Button, fmt, IconButton, Kbd, Modal, Segmented } from "./ui";
 
 // ---------------------------------------------------------- command palette
 
@@ -58,6 +62,7 @@ function useCommands(): Command[] {
       }
       // Stop is never the default (first) item: Ctrl+K, Enter must not kill a running game.
       if (isActive(instance)) out.push({ id: "stop", group: g, label: "Stop session", icon: <Square size={15} />, run: () => stop(pack) });
+      else out.push({ id: "delete", group: g, label: "Delete pack…", icon: <Trash2 size={15} />, run: () => s.open("delete-pack") });
       out.push(
         { id: "t1", group: "Go to", label: "Overview", icon: <Gauge size={15} />, keys: ["Ctrl", "1"], run: () => s.setTab("overview") },
         { id: "t2", group: "Go to", label: "Content", icon: <Boxes size={15} />, keys: ["Ctrl", "2"], run: () => s.setTab("content") },
@@ -188,9 +193,11 @@ export function AddContentDialog() {
   const [query, setQuery] = useState("");
   const [hits, setHits] = useState<SearchHit[] | null>(null);
   const [adding, setAdding] = useState<string | null>(null);
+  const [mode, setMode] = useState<"search" | "custom">("search");
+  const [expanded, setExpanded] = useState<string | null>(null);
 
   useEffect(() => {
-    if (!isOpen || !pack) return;
+    if (!isOpen || !pack || mode !== "search") return;
     let stale = false;
     const t = setTimeout(async () => {
       try {
@@ -204,20 +211,22 @@ export function AddContentDialog() {
       stale = true;
       clearTimeout(t);
     };
-  }, [isOpen, pack, query, kind, owned]);
+  }, [isOpen, pack, query, kind, owned, mode]);
 
   useEffect(() => {
     if (!isOpen) {
       setQuery("");
       setHits(null);
+      setMode("search");
+      setExpanded(null);
     }
   }, [isOpen]);
 
   if (!pack) return null;
 
-  const add = async (hit: SearchHit) => {
+  const add = async (hit: SearchHit, version?: VersionSummary) => {
     setAdding(hit.slug);
-    await useStore.getState().run(backend.addContent(pack.id, hit), `Added ${hit.name}`);
+    await useStore.getState().run(backend.addContent(pack.id, hit, version && versionArg(hit, version)), `Added ${hit.name}${version ? ` ${version.version_number}` : ""}`);
     setAdding(null);
   };
 
@@ -230,10 +239,21 @@ export function AddContentDialog() {
       style={{ width: "min(620px, calc(100vw - 48px))" }}
     >
       <div className="modal-body" style={{ paddingBottom: 12 }}>
-        <div className="search">
-          <Search size={14} />
-          <input className="input" autoFocus placeholder="Search Modrinth and CurseForge" value={query} onChange={(e) => setQuery(e.target.value)} />
-        </div>
+        <Segmented
+          value={mode}
+          onChange={setMode}
+          label="Where to add from"
+          options={[
+            { value: "search", label: "Browse" },
+            { value: "custom", label: "Custom file or URL" },
+          ]}
+        />
+        {mode === "search" && (
+          <div className="search">
+            <Search size={14} />
+            <input className="input" autoFocus placeholder="Search Modrinth and CurseForge" value={query} onChange={(e) => setQuery(e.target.value)} />
+          </div>
+        )}
         <div className="row">
           <Segmented value={kind} onChange={setKind} options={KINDS} label="Content type" />
           <span className="grow" />
@@ -242,30 +262,63 @@ export function AddContentDialog() {
           </span>
         </div>
       </div>
-      <div className="hits">
-        {hits === null && <div className="pal-empty">Searching…</div>}
-        {hits?.length === 0 && <div className="pal-empty">No compatible results{query && ` for “${query}”`}</div>}
-        {hits?.map((h) => (
-          <div key={h.slug} className="hit">
-            <span className="avatar">{h.name[0]}</span>
-            <div className="grow">
-              <div className="row">
-                <span style={{ fontWeight: 500 }}>{h.name}</span>
-                <Badge>{h.source === "modrinth" ? "Modrinth" : "CurseForge"}</Badge>
-                <span className="faint" style={{ fontSize: 12 }}>
-                  {fmt.count(h.downloads)} downloads
-                </span>
+      {mode === "custom" ? (
+        <CustomContentForm pack={pack} kind={kind} />
+      ) : (
+        <div className="hits">
+          {hits === null && <div className="pal-empty">Searching…</div>}
+          {hits?.length === 0 && <div className="pal-empty">No compatible results{query && ` for “${query}”`}</div>}
+          {hits?.map((h) => {
+            const url = h.url ?? pageUrl(h);
+            const isOpenRow = expanded === h.slug;
+            return (
+              <div key={h.slug} className="hit-wrap">
+                <div className="hit">
+                  <span className="avatar">{h.name[0]}</span>
+                  <div className="grow">
+                    <div className="row">
+                      <span style={{ fontWeight: 500 }}>{h.name}</span>
+                      <Badge>{h.source === "modrinth" ? "Modrinth" : "CurseForge"}</Badge>
+                      <span className="faint" style={{ fontSize: 12 }}>
+                        {fmt.count(h.downloads)} downloads
+                      </span>
+                    </div>
+                    <div className="desc truncate">{h.description}</div>
+                  </div>
+                  {h.latest && <span className="mono faint">{h.latest}</span>}
+                  {url && (
+                    <IconButton size="sm" label={`Open ${h.name} on ${h.source === "modrinth" ? "Modrinth" : "CurseForge"}`} onClick={() => openUrl(url)}>
+                      <ExternalLink size={13} />
+                    </IconButton>
+                  )}
+                  <Button size="sm" variant="ghost" aria-expanded={isOpenRow} title="More info and versions" onClick={() => setExpanded(isOpenRow ? null : h.slug)}>
+                    Versions
+                    <ChevronDown size={13} style={{ transform: isOpenRow ? "rotate(180deg)" : undefined }} />
+                  </Button>
+                  <Button size="sm" disabled={adding !== null} onClick={() => void add(h)} aria-label={`Add latest ${h.name}`} title="Add the latest compatible version">
+                    {adding === h.slug ? <LoaderCircle size={13} className="spin" /> : <Plus size={13} />}
+                    Add
+                  </Button>
+                </div>
+                {isOpenRow && (
+                  <div className="hit-more">
+                    <p>{h.description}</p>
+                    <div className="row faint" style={{ fontSize: 12 }}>
+                      {h.author && <span>by {h.author}</span>}
+                      {url && (
+                        <button type="button" className="link" onClick={() => openUrl(url)}>
+                          {url.replace(/^https?:\/\/(www\.)?/, "")}
+                        </button>
+                      )}
+                    </div>
+                    <VersionList pack={pack} item={h} busy={adding !== null} action="Add" onPick={(v) => void add(h, v)} />
+                  </div>
+                )}
               </div>
-              <div className="desc truncate">{h.description}</div>
-            </div>
-            <span className="mono faint">{h.latest}</span>
-            <Button size="sm" disabled={adding !== null} onClick={() => void add(h)} aria-label={`Add ${h.name}`}>
-              {adding === h.slug ? <LoaderCircle size={13} className="spin" /> : <Plus size={13} />}
-              Add
-            </Button>
-          </div>
-        ))}
-      </div>
+            );
+          })}
+        </div>
+      )}
     </Modal>
   );
 }
@@ -373,7 +426,7 @@ export function ExportPackDialog() {
     e.preventDefault();
     if (busy) return;
     const s = useStore.getState();
-    const name = pack.name.replace(/[<>:"/\|?*]+/g, "").trim() || "modpack";
+    const name = pack.name.replace(/[<>:"/\\|?*]+/g, "").trim() || "modpack";
     const out = await s.run(backend.pickExportPath(name, format));
     if (!out) return;
     setBusy(true);

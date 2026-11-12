@@ -16,6 +16,7 @@ import {
   type InstanceState,
   type Pack,
   type SearchHit,
+  type VersionSummary,
   BackendError,
   PACK_FORMATS,
 } from "./types";
@@ -23,6 +24,8 @@ import {
 interface TauriGlobal {
   core: { invoke<T>(cmd: string, args?: Record<string, unknown>): Promise<T> };
   event: { listen<T>(name: string, fn: (e: { payload: T }) => void): Promise<() => void> };
+  /** tauri-plugin-opener */
+  opener: { openUrl(url: string): Promise<void> };
   /** tauri-plugin-dialog */
   dialog: {
     open(opts: { title?: string; multiple?: boolean; directory?: boolean; filters?: { name: string; extensions: string[] }[] }): Promise<string | string[] | null>;
@@ -118,13 +121,34 @@ export const nativeBackend: Backend = {
     return info.content ?? [];
   },
   search: (pack, query, kind) => call<SearchHit[]>("search_mods", { pack, query, kind, limit: 20 }),
-  async addContent(pack, hit) {
+  async addContent(pack, item, version) {
     await call("pack_add", {
       pack,
-      id: hit.slug,
-      source: hit.source === "local" ? undefined : hit.source,
-      kind: hit.kind,
+      id: item.slug,
+      source: item.source === "local" ? undefined : item.source,
+      kind: item.kind,
+      version,
     });
+  },
+  versions: (pack, item) => call<VersionSummary[]>("mod_versions", { pack, id: item.slug, source: item.source }),
+  async pickContentFile() {
+    const r = await tauri().dialog.open({
+      title: "Add a file to the pack",
+      multiple: false,
+      directory: false,
+      filters: [{ name: "Mods and packs (.jar, .zip)", extensions: ["jar", "zip"] }],
+    });
+    return typeof r === "string" ? r : null;
+  },
+  async addCustom(pack, input) {
+    await call("pack_add", { pack, kind: input.kind, ...(input.url ? { source: "url", url: input.url } : { source: "file", path: input.path }) });
+  },
+  async deletePack(pack, files) {
+    await call("pack_delete", { pack, files });
+  },
+  async openUrl(url) {
+    if (!/^https?:\/\//i.test(url)) throw new BackendError("invalid", `not a web address: ${url}`);
+    await tauri().opener.openUrl(url);
   },
   async removeContent(pack, slug) {
     await call("pack_remove", { pack, id: slug });

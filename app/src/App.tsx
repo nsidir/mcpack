@@ -1,6 +1,7 @@
 import { Package } from "lucide-react";
 import { useEffect } from "react";
 import { AddContentDialog, CommandPalette, ExportPackDialog, NewPackDialog } from "./components/Dialogs";
+import { DeletePackDialog, VersionDialog } from "./components/ContentDialogs";
 import { Sidebar, StatusBar, Titlebar, Toasts } from "./components/Shell";
 import { Button, Empty } from "./components/ui";
 import { importPack, launch, type PackTab, usePack, useStore } from "./store";
@@ -90,6 +91,8 @@ export function App() {
       <AddContentDialog />
       <NewPackDialog />
       <ExportPackDialog />
+      <VersionDialog />
+      <DeletePackDialog />
       <Toasts />
     </div>
   );

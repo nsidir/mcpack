@@ -44,6 +44,36 @@ export interface SearchHit {
   description: string;
   downloads: number;
   latest: string;
+  author?: string | null;
+  /** Project page on Modrinth / CurseForge. */
+  url?: string | null;
+}
+
+/** Enough to name a project when adding it or listing its versions (a search hit or an installed entry). */
+export interface ContentRef {
+  slug: string;
+  name?: string;
+  kind: ContentKind;
+  source: ContentSource;
+}
+
+/** One published version of a project (core `VersionSummary`). */
+export interface VersionSummary {
+  id: string;
+  version_number: string;
+  /** release | beta | alpha */
+  version_type: string;
+  game_versions: string[];
+  loaders: string[];
+  date: string;
+  filename?: string | null;
+}
+
+/** A mod (or resource pack, ...) that is not from Modrinth/CurseForge: a local file or a direct download URL. */
+export interface CustomContent {
+  kind: ContentKind;
+  path?: string;
+  url?: string;
 }
 
 export type InstancePhase = "resolve" | "download" | "java" | "launch" | "agent";
@@ -170,7 +200,17 @@ export interface Backend {
   createPack(input: { name: string; minecraft: string; loader: Loader }): Promise<Pack>;
   content(packId: string): Promise<ContentEntry[]>;
   search(packId: string, query: string, kind: ContentKind): Promise<SearchHit[]>;
-  addContent(packId: string, hit: SearchHit): Promise<void>;
+  /** Add a project, or re-pin one that is already in the pack. Without `version`: latest compatible. */
+  addContent(packId: string, item: ContentRef, version?: string): Promise<void>;
+  /** Versions compatible with the pack's Minecraft version and loader, newest first. */
+  versions(packId: string, item: ContentRef): Promise<VersionSummary[]>;
+  /** Ask for a local .jar / .zip to add. null = cancelled. */
+  pickContentFile(): Promise<string | null>;
+  addCustom(packId: string, input: CustomContent): Promise<void>;
+  /** Remove a pack from the launcher; `files` also deletes its folder (only for packs under <home>/packs). */
+  deletePack(packId: string, files: boolean): Promise<void>;
+  /** Open a web page in the default browser. */
+  openUrl(url: string): Promise<void>;
   removeContent(packId: string, slug: string): Promise<void>;
   updateContent(packId: string, slug: string): Promise<void>;
   resolve(packId: string): Promise<void>;

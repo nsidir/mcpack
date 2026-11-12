@@ -120,7 +120,11 @@ const h = (
   downloads: number,
   latest: string,
   o: Partial<SearchHit> = {},
-): SearchHit => ({ slug, name, description, downloads, latest, kind: "mod", source: "modrinth", ...o });
+): SearchHit => {
+  const hit: SearchHit = { slug, name, description, downloads, latest, kind: "mod", source: "modrinth", author: "someone", ...o };
+  hit.url = hit.source === "modrinth" ? `https://modrinth.com/project/${slug}` : `https://www.curseforge.com/minecraft/mc-mods/${slug}`;
+  return hit;
+};
 
 const catalog: SearchHit[] = [
   h("sodium", "Sodium", "The fastest rendering optimization mod for Minecraft.", 98_400_000, "0.6.6"),
@@ -466,15 +470,76 @@ export const mockBackend: Backend = {
       .sort((a, b) => b.downloads - a.downloads);
   },
 
-  addContent(packId, hit) {
-    return track("pack_add", packId, `Added ${hit.slug} ${hit.latest}`, { slug: hit.slug, source: hit.source }, async () => {
+  addContent(packId, item, version) {
+    const hit = catalog.find((c) => c.slug === item.slug);
+    const v = version ?? hit?.latest ?? "1.0.0";
+    return track("pack_add", packId, `Added ${item.slug} ${v}`, { slug: item.slug, source: item.source, version }, async () => {
       await sleep(700);
-      if (hit.source === "curseforge" && !config.curseforge_api_key)
+      if (item.source === "curseforge" && !config.curseforge_api_key)
         throw new BackendError("config", "missing configuration: CurseForge API key (set it in Settings)");
       const list = content[packId] ?? (content[packId] = []);
-      list.push(e(hit.slug, hit.name, hit.latest, 900_000, { kind: hit.kind, source: hit.source }));
+      const i = list.findIndex((c) => c.slug === item.slug);
+      if (i >= 0) list[i] = { ...list[i], version: v, update: hit && hit.latest !== v ? hit.latest : undefined };
+      else list.push(e(item.slug, item.name ?? hit?.name ?? item.slug, v, 900_000, { kind: item.kind, source: item.source }));
       emit({ type: "content", packId, content: [...list] });
     });
+  },
+
+  async versions(packId, item) {
+    const pack = findPack(packId);
+    await sleep(350);
+    const cur = (content[packId] ?? []).find((c) => c.slug === item.slug);
+    const latest = cur?.update ?? catalog.find((c) => c.slug === item.slug)?.latest ?? cur?.version ?? "1.0.0";
+    // Count the last numeric component down to fabricate a history.
+    const m = /^(.*?)(\d+)([^\d]*)$/.exec(latest);
+    const day = 86_400_000;
+    return Array.from({ length: 8 }, (_, i) => {
+      const n = m ? Number(m[2]) - i : 0;
+      return {
+        id: `${item.slug}-v${i}`,
+        version_number: m && n >= 0 ? `${m[1]}${n}${m[3]}` : `${latest}-${i}`,
+        version_type: i === 1 ? "beta" : i === 5 ? "alpha" : "release",
+        game_versions: [pack.minecraft],
+        loaders: item.kind === "mod" ? [pack.loader] : [],
+        date: new Date(Date.now() - i * 19 * day).toISOString(),
+        filename: `${item.slug}.jar`,
+      };
+    }).filter((v, i, all) => all.findIndex((x) => x.version_number === v.version_number) === i);
+  },
+
+  async pickContentFile() {
+    return "C:\\Users\\you\\dev\\my-mod\\build\\libs\\my-mod-0.1.0.jar";
+  },
+
+  addCustom(packId, input) {
+    const from = input.url ?? input.path ?? "";
+    const filename = from.split(/[\\/?#]/).filter(Boolean).pop() ?? "custom";
+    return track("pack_add", packId, `Added ${filename}`, { ...input }, async () => {
+      await sleep(500);
+      if (!from.trim()) throw new BackendError("invalid", "invalid input: give a file or a URL");
+      const list = content[packId] ?? (content[packId] = []);
+      const slug = filename.replace(/\.(jar|zip)$/i, "");
+      if (list.some((c) => c.slug === slug)) throw new BackendError("invalid", `invalid input: '${slug}' is already in the pack`);
+      list.push(e(slug, slug, "local", 420_000, { kind: input.kind, source: "local" }));
+      emit({ type: "content", packId, content: [...list] });
+    });
+  },
+
+  deletePack(packId, files) {
+    const pack = findPack(packId);
+    return track("pack_delete", undefined, `Deleted ${pack.name}`, { pack: pack.path, files }, async () => {
+      await sleep(300);
+      const st = session(packId).state.status;
+      if (st !== "stopped" && st !== "crashed") throw new BackendError("invalid", "invalid input: the game is running for this pack; stop it first");
+      packs.splice(packs.indexOf(pack), 1);
+      delete content[packId];
+      sessions.delete(packId);
+      emit({ type: "packs", packs: packs.map((p) => ({ ...p })) });
+    });
+  },
+
+  async openUrl(url) {
+    window.open(url, "_blank", "noopener");
   },
 
   removeContent(packId, slug) {

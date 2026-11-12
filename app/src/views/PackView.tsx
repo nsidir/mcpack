@@ -1,4 +1,4 @@
-import { Bot, Boxes, Check, Copy, Gauge, LoaderCircle, Play, RefreshCw, Square, SquareTerminal, Upload } from "lucide-react";
+import { Bot, Boxes, Check, Copy, Gauge, LoaderCircle, Play, RefreshCw, Square, SquareTerminal, Trash2, Upload } from "lucide-react";
 import { type CSSProperties, type ReactNode, useMemo, useState } from "react";
 import { backend, type InstanceState, type Pack, PHASES } from "../api";
 import { Badge, Button, copy, Dot, fmt, IconButton, Switch, useNow } from "../components/ui";
@@ -61,9 +61,14 @@ export function PackView({ pack }: { pack: Pack }) {
 function LaunchControl({ pack, instance }: { pack: Pack; instance?: InstanceState }) {
   const now = useNow(1000, instance?.status === "running");
   const exportButton = (
-    <IconButton label="Export modpack…" onClick={() => useStore.getState().open("export-pack")}>
-      <Upload size={15} />
-    </IconButton>
+    <>
+      <IconButton label="Delete pack…" onClick={() => useStore.getState().open("delete-pack")}>
+        <Trash2 size={15} />
+      </IconButton>
+      <IconButton label="Export modpack…" onClick={() => useStore.getState().open("export-pack")}>
+        <Upload size={15} />
+      </IconButton>
+    </>
   );
 
   if (instance?.status === "preparing") {

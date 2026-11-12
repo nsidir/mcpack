@@ -15,7 +15,7 @@ import {
 export type View = "pack" | "activity" | "settings";
 export type PackTab = "overview" | "content" | "console" | "agent";
 export type Theme = "system" | "dark" | "light";
-export type Dialog = null | "palette" | "add-content" | "new-pack" | "export-pack";
+export type Dialog = null | "palette" | "add-content" | "new-pack" | "export-pack" | "versions" | "delete-pack";
 
 export interface Toast {
   id: number;
@@ -76,6 +76,9 @@ interface State {
   toasts: Toast[];
   /** A modpack import is in flight. */
   importing: boolean;
+  /** Installed entry whose version is being chosen (dialog "versions"). */
+  versionTarget: ContentEntry | null;
+  pickVersion(entry: ContentEntry): void;
 
   init(): Promise<void>;
   selectPack(id: string): void;
@@ -116,6 +119,8 @@ export const useStore = create<State>((set, get) => ({
   config: null,
   toasts: [],
   importing: false,
+  versionTarget: null,
+  pickVersion: (entry) => set({ versionTarget: entry, dialog: "versions" }),
 
   async init() {
     backend.subscribe((e) => {
@@ -325,4 +330,49 @@ export async function importPack() {
 
 export function agentAction(pack: Pack, method: string, params: Record<string, unknown> = {}, ok?: string) {
   return useStore.getState().run(backend.agent(pack.id, method, params), ok);
+}
+
+/** Can this pack's folder be deleted by the launcher? Only packs it created under <home>/packs. */
+export function isManaged(pack: Pack): boolean {
+  const home = useStore.getState().info?.home;
+  if (!home) return false;
+  const norm = (p: string) => p.replace(/\\/g, "/").replace(/\/+$/, "").toLowerCase();
+  return norm(pack.path).startsWith(`${norm(home)}/packs/`);
+}
+
+/** Remove a pack from the launcher (optionally with its folder) and move the selection elsewhere. */
+export async function deletePack(pack: Pack, files: boolean): Promise<boolean> {
+  const s = useStore.getState();
+  try {
+    await backend.deletePack(pack.id, files);
+  } catch (err) {
+    if (err instanceof BackendError) s.toast("error", err.message, err.code);
+    else s.toast("error", err instanceof Error ? err.message : String(err));
+    return false;
+  }
+  useStore.setState((st) => {
+    const packs = st.packs.filter((p) => p.id !== pack.id);
+    const { [pack.id]: _c, ...content } = st.content;
+    const { [pack.id]: _i, ...instances } = st.instances;
+    const { [pack.id]: _l, ...logs } = st.logs;
+    return { packs, content, instances, logs, packId: st.packId === pack.id ? (packs[0]?.id ?? null) : st.packId };
+  });
+  const next = useStore.getState().packId;
+  if (next) useStore.getState().selectPack(next);
+  s.toast("ok", files ? `Deleted ${pack.name}` : `Removed ${pack.name} from the launcher`);
+  return true;
+}
+
+/** Project page of a Modrinth / CurseForge entry, when it can be derived from the slug. */
+export function pageUrl(item: { slug: string; kind: string; source: string }): string | null {
+  if (item.source === "modrinth") return `https://modrinth.com/project/${encodeURIComponent(item.slug)}`;
+  if (item.source === "curseforge" && !/^\d+$/.test(item.slug)) {
+    const section = { mod: "mc-mods", resourcepack: "texture-packs", shaderpack: "shaders", datapack: "data-packs" }[item.kind] ?? "mc-mods";
+    return `https://www.curseforge.com/minecraft/${section}/${encodeURIComponent(item.slug)}`;
+  }
+  return null;
+}
+
+export function openUrl(url: string) {
+  void useStore.getState().run(backend.openUrl(url));
 }
