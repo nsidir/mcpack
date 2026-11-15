@@ -308,7 +308,7 @@ async function runLaunch(pack: Pack, profile: string) {
   if (!alive()) return;
   log(id, "info", "mcpack", "Using Java 21.0.5 from cache/java/java-runtime-delta");
 
-  setState(id, { phase: "launch", detail: "Starting Minecraft", pid: 10_000 + Math.floor(Math.random() * 20_000), startedAt: Date.now() });
+  setState(id, { phase: "launch", detail: "Starting Minecraft", pid: 10_000 + Math.floor(Math.random() * 20_000), startedAt: Date.now(), hotswapPort: pack.hotswap ? 5005 : undefined });
   const boot: [LogLevel, string, string][] = [
     ["info", "main", `Loading Minecraft ${pack.minecraft} with Fabric Loader ${pack.loaderVersion}`],
     ["info", "main", `Loading ${items + 48} mods`],
@@ -362,7 +362,7 @@ function endSession(packId: string, exitCode: number) {
   s.ticker = undefined;
   s.agent = null;
   const wasUp = s.state.status !== "stopped";
-  setState(packId, { status: "stopped", phase: undefined, progress: undefined, detail: undefined, pid: undefined, agentPort: undefined, startedAt: undefined, exitCode });
+  setState(packId, { status: "stopped", phase: undefined, progress: undefined, detail: undefined, pid: undefined, agentPort: undefined, hotswapPort: undefined, startedAt: undefined, exitCode });
   emit({ type: "agent", packId, status: null });
   if (wasUp) log(packId, "info", "mcpack", `Process exited with code ${exitCode}`);
 }
@@ -578,6 +578,10 @@ export const mockBackend: Backend = {
 
   async openUrl(url) {
     window.open(url, "_blank", "noopener");
+  },
+
+  async openFolder() {
+    // No file manager in the browser preview.
   },
 
   removeContent(packId, slug) {

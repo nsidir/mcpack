@@ -1,8 +1,8 @@
-import { Bot, Boxes, Check, Copy, Gauge, LoaderCircle, Play, RefreshCw, RotateCw, Square, SquareTerminal, Trash2, Upload } from "lucide-react";
+import { Bot, Boxes, Check, Copy, FolderOpen, Gauge, LoaderCircle, Play, RefreshCw, RotateCw, Square, SquareTerminal, Trash2, Upload } from "lucide-react";
 import { type CSSProperties, type ReactNode, useMemo, useState } from "react";
 import { backend, type InstanceState, type Pack, PHASES } from "../api";
 import { Badge, Button, copy, Dot, fmt, IconButton, useNow } from "../components/ui";
-import { launch, type PackTab, pendingRestart, profileOf, restartGame, setProfile, stateLabel, stop, useStore } from "../store";
+import { launch, openFolder, type PackTab, pendingRestart, profileOf, restartGame, setProfile, stateLabel, stop, useStore } from "../store";
 import { HotReloadPanel } from "./HotReload";
 import { AgentTab, ConsoleTab, ContentTab } from "./PackTabs";
 import { OriginBadge, StatusIcon } from "./Pages";
@@ -65,6 +65,9 @@ function LaunchControl({ pack, instance }: { pack: Pack; instance?: InstanceStat
   const pending = pendingRestart(events, instance);
   const exportButton = (
     <>
+      <IconButton label="Open instance folder" onClick={() => openFolder(pack)}>
+        <FolderOpen size={15} />
+      </IconButton>
       <IconButton label="Delete pack…" onClick={() => useStore.getState().open("delete-pack")}>
         <Trash2 size={15} />
       </IconButton>

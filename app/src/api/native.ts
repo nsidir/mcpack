@@ -146,6 +146,9 @@ export const nativeBackend: Backend = {
   async deletePack(pack, files) {
     await call("pack_delete", { pack, files });
   },
+  async openFolder(pack, profile, what) {
+    await call("open_folder", { pack, profile, what });
+  },
   async openUrl(url) {
     // The opener capability (src-tauri/capabilities/default.json) only allows https pages.
     if (!/^https:\/\//i.test(url)) throw new BackendError("invalid", `only https pages can be opened: ${url}`);

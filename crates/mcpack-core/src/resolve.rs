@@ -259,6 +259,11 @@ impl<'a> Resolver<'a> {
                             .await?
                     }
                 };
+                let mut rv = rv;
+                if spec.deps == Some(false) {
+                    rv.required.clear();
+                    rv.optional.clear();
+                }
                 let with_optional = spec.optional_deps.unwrap_or(false);
                 self.insert_resolved(rv, with_optional).await?
             }
@@ -368,7 +373,7 @@ impl<'a> Resolver<'a> {
                                 continue;
                             }
                             Err(e) => {
-                                self.errors.push(format!("dependency of {}: {e}", rv.name));
+                                self.dep_failed(source, format!("dependency of {}: {e}", rv.name));
                                 continue;
                             }
                         }
@@ -389,7 +394,10 @@ impl<'a> Resolver<'a> {
                 }
                 match self.fetch_dep(source, &dep).await {
                     Ok(d) => queue.push_back((d, false)),
-                    Err(e) => self.errors.push(format!("required dependency {dep_key} of {}: {e}", rv.name)),
+                    Err(e) => {
+                        dep_keys.retain(|k| k != &dep_key);
+                        self.dep_failed(source, format!("required dependency {dep_key} of {}: {e}", rv.name));
+                    }
                 }
             }
             if let Some(e) = self.entries.get_mut(&key) {
@@ -399,6 +407,16 @@ impl<'a> Resolver<'a> {
             }
         }
         Ok(root_key)
+    }
+
+    /// A dependency that cannot be resolved. CurseForge lists dependencies per project, not
+    /// per loader, so a Fabric file can name a Forge-only project: warn instead of failing.
+    fn dep_failed(&mut self, source: Source, msg: String) {
+        if source == Source::Curseforge {
+            self.warnings.push(format!("{msg} (skipped: CurseForge dependency lists are not loader-specific)"));
+        } else {
+            self.errors.push(msg);
+        }
     }
 
     /// CurseForge files whose authors disallow third-party downloads have no URL. Many are

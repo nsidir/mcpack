@@ -42,7 +42,7 @@ export interface Shot {
 const MAX_LOG = 2000;
 const MAX_WATCH = 40;
 
-const plural = (n: number, word: string) => `${n} ${word}${n === 1 ? "" : "s"}`;
+const plural = (n: number, word: string) => `${n} ${word}${n === 1 ? "" : /(s|x|z|ch|sh)$/.test(word) ? "es" : "s"}`;
 
 /** One-line summary of a watcher event (the change feed and toasts use it). */
 export function describeWatch(e: WatchEvent): string {
@@ -449,6 +449,10 @@ export function pageUrl(item: { slug: string; kind: string; source: string }): s
     return `https://www.curseforge.com/minecraft/${section}/${encodeURIComponent(item.slug)}`;
   }
   return null;
+}
+
+export function openFolder(pack: Pack, what: "instance" | "pack" = "instance") {
+  void useStore.getState().run(backend.openFolder(pack.id, profileOf(pack), what));
 }
 
 export function openUrl(url: string) {

@@ -168,6 +168,7 @@ impl Launcher {
                 source: Source::Curseforge,
                 id: Some(f.project_id.to_string()),
                 version: Some(f.file_id.to_string()),
+                deps: Some(false),
                 ..Default::default()
             });
         }

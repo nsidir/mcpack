@@ -165,10 +165,12 @@ pub fn scan_mods_dir(dir: &Path) -> Result<(Vec<ModMeta>, Vec<String>)> {
     Ok((mods, non_mods))
 }
 
-fn collect_ids(m: &ModMeta, out: &mut BTreeMap<String, String>) {
-    out.entry(m.id.clone()).or_insert_with(|| m.version.clone());
+/// Every version of each mod id present (top-level jars and jar-in-jar copies). Fabric picks
+/// one candidate per id while satisfying dependencies, so any of them may be the one loaded.
+fn collect_ids(m: &ModMeta, out: &mut BTreeMap<String, Vec<String>>) {
+    out.entry(m.id.clone()).or_default().push(m.version.clone());
     for p in &m.provides {
-        out.entry(p.clone()).or_insert_with(|| m.version.clone());
+        out.entry(p.clone()).or_default().push(m.version.clone());
     }
     for n in &m.nested {
         collect_ids(n, out);
@@ -178,17 +180,17 @@ fn collect_ids(m: &ModMeta, out: &mut BTreeMap<String, String>) {
 /// Validate jar-level dependencies against Minecraft version and Java major.
 pub fn check_mods(mods: &[ModMeta], minecraft: &str, java_major: Option<u32>, loader_version: &str) -> Vec<Problem> {
     let mut problems = Vec::new();
-    let mut ids: BTreeMap<String, String> = BTreeMap::new();
+    let mut ids: BTreeMap<String, Vec<String>> = BTreeMap::new();
     for m in mods {
         collect_ids(m, &mut ids);
     }
-    ids.insert("minecraft".into(), minecraft.into());
+    ids.insert("minecraft".into(), vec![minecraft.into()]);
     if let Some(j) = java_major {
-        ids.insert("java".into(), j.to_string());
+        ids.insert("java".into(), vec![j.to_string()]);
     }
     if !loader_version.is_empty() {
-        ids.insert("fabricloader".into(), loader_version.into());
-        ids.insert("fabric-loader".into(), loader_version.into());
+        ids.insert("fabricloader".into(), vec![loader_version.into()]);
+        ids.insert("fabric-loader".into(), vec![loader_version.into()]);
     }
 
     // Duplicates among top-level jars.
@@ -229,8 +231,10 @@ pub fn check_mods(mods: &[ModMeta], minecraft: &str, java_major: Option<u32>, lo
                         );
                     }
                 }
-                Some(have) => {
-                    if version_matches(have, preds) == Some(false) {
+                Some(haves) => {
+                    let results: Vec<Option<bool>> = haves.iter().map(|h| version_matches(h, preds)).collect();
+                    if results.iter().all(|r| *r == Some(false)) {
+                        let have = best_version(haves);
                         let kind = if dep == "java" { "wrong_java" } else { "wrong_dependency_version" };
                         let pr = Problem::error(
                             kind,
@@ -249,8 +253,10 @@ pub fn check_mods(mods: &[ModMeta], minecraft: &str, java_major: Option<u32>, lo
             }
         }
         for (other, preds) in &m.breaks {
-            if let Some(have) = ids.get(other) {
-                if version_matches(have, preds) != Some(false) && other != &m.id {
+            if let Some(haves) = ids.get(other) {
+                // Unavoidable only when every candidate version is in the broken range.
+                if haves.iter().all(|h| version_matches(h, preds) != Some(false)) && other != &m.id {
+                    let have = best_version(haves);
                     problems.push(
                         Problem::error("incompatible_mods", format!("{} declares it breaks with '{other}' {} ({have} present)", m.id, preds.join(" || ")))
                             .mods(vec![m.id.clone(), other.clone()])
@@ -261,6 +267,19 @@ pub fn check_mods(mods: &[ModMeta], minecraft: &str, java_major: Option<u32>, lo
         }
     }
     problems
+}
+
+/// The highest parseable version (for messages).
+fn best_version(vs: &[String]) -> String {
+    vs.iter()
+        .max_by(|a, b| match (parse_ver(a), parse_ver(b)) {
+            (Some(x), Some(y)) => cmp_ver(&x, &y),
+            (Some(_), None) => std::cmp::Ordering::Greater,
+            (None, Some(_)) => std::cmp::Ordering::Less,
+            (None, None) => std::cmp::Ordering::Equal,
+        })
+        .cloned()
+        .unwrap_or_default()
 }
 
 // ---------- version predicates (Fabric semver-ish) ----------
@@ -288,7 +307,44 @@ fn cmp_ver(a: &[u64], b: &[u64]) -> std::cmp::Ordering {
     std::cmp::Ordering::Equal
 }
 
-fn single(have: &[u64], c: &str) -> Option<bool> {
+/// The pre-release part (`1.20-3.1.44` -> `3.1.44`), ignoring build metadata after `+`.
+fn pre_release(v: &str) -> Option<&str> {
+    v.split('+').next()?.split_once('-').map(|(_, p)| p).filter(|p| !p.is_empty())
+}
+
+/// SemVer precedence for pre-release parts: a version with one sorts before the same version
+/// without; dot-separated identifiers compare numerically when both are numbers.
+fn cmp_pre(a: Option<&str>, b: Option<&str>) -> std::cmp::Ordering {
+    use std::cmp::Ordering::*;
+    match (a, b) {
+        (None, None) => Equal,
+        (None, Some(_)) => Greater,
+        (Some(_), None) => Less,
+        (Some(a), Some(b)) => {
+            let (mut x, mut y) = (a.split('.'), b.split('.'));
+            loop {
+                match (x.next(), y.next()) {
+                    (None, None) => return Equal,
+                    (None, Some(_)) => return Less,
+                    (Some(_), None) => return Greater,
+                    (Some(p), Some(q)) => {
+                        let o = match (p.parse::<u64>(), q.parse::<u64>()) {
+                            (Ok(m), Ok(n)) => m.cmp(&n),
+                            (Ok(_), Err(_)) => Less,
+                            (Err(_), Ok(_)) => Greater,
+                            _ => p.cmp(q),
+                        };
+                        if o != Equal {
+                            return o;
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+fn single(have: &[u64], have_pre: Option<&str>, c: &str) -> Option<bool> {
     use std::cmp::Ordering::*;
     let c = c.trim();
     if c.is_empty() || c == "*" {
@@ -318,7 +374,7 @@ fn single(have: &[u64], c: &str) -> Option<bool> {
         return Some(have.len() >= prefix.len() && have[..prefix.len()] == prefix[..]);
     }
     let want = parse_ver(rest)?;
-    let o = cmp_ver(have, &want);
+    let o = cmp_ver(have, &want).then_with(|| cmp_pre(have_pre, pre_release(rest)));
     Some(match op {
         ">=" => o != Less,
         "<=" => o != Greater,
@@ -336,10 +392,8 @@ fn single(have: &[u64], c: &str) -> Option<bool> {
             o != Less && cmp_ver(have, &upper) == Less
         }
         "^" => {
-            let mut upper = vec![want.first().copied().unwrap_or(0) + 1];
-            if want.first() == Some(&0) && want.len() > 1 {
-                upper = vec![0, want[1] + 1];
-            }
+            // Fabric: same major version (no npm-style special case for 0.x).
+            let upper = vec![want.first().copied().unwrap_or(0) + 1];
             o != Less && cmp_ver(have, &upper) == Less
         }
         _ => return None,
@@ -350,12 +404,13 @@ fn single(have: &[u64], c: &str) -> Option<bool> {
 /// Returns None when versions cannot be interpreted.
 pub fn version_matches(have: &str, preds: &[String]) -> Option<bool> {
     let hv = parse_ver(have)?;
+    let hpre = pre_release(have);
     let mut any_parsed = false;
     for p in preds {
         let mut all = true;
         let mut parsed = true;
         for c in p.split_whitespace() {
-            match single(&hv, c) {
+            match single(&hv, hpre, c) {
                 Some(true) => {}
                 Some(false) => all = false,
                 None => parsed = false,
@@ -397,6 +452,11 @@ mod tests {
         assert_eq!(version_matches("21", &s(&[">=17"])), Some(true));
         assert_eq!(version_matches("0.16.14", &s(&[">=0.15.0"])), Some(true));
         assert_eq!(version_matches("0.92.2+1.20.1", &s(&["*"])), Some(true));
+        assert_eq!(version_matches("0.6.3", &s(&["^0.4.3"])), Some(true));
+        assert_eq!(version_matches("1.20-3.1.44", &s(&["<=1.20-2.7.32"])), Some(false));
+        assert_eq!(version_matches("1.20-2.7.30", &s(&["<=1.20-2.7.32"])), Some(true));
+        assert_eq!(version_matches("1.0.0-beta.2", &s(&[">=1.0.0-beta.10"])), Some(false));
+        assert_eq!(version_matches("1.0.0", &s(&["^0.4.3"])), Some(false));
         assert_eq!(version_matches("1.21.1", &s(&["1.21-alpha.24.1.a"])), Some(false));
     }
 
@@ -420,5 +480,20 @@ mod tests {
         assert!(check_mods(&[a.clone(), api.clone()], "1.21.1", Some(21), "").is_empty());
         let p = check_mods(&[a, api], "1.20.1", Some(17), "");
         assert!(p.iter().any(|x| x.kind == "wrong_dependency_version"));
+    }
+
+    #[test]
+    fn older_nested_copy_does_not_hide_newer_top_level() {
+        let user = ModMeta {
+            id: "wands".into(),
+            version: "2.6.9".into(),
+            depends: BTreeMap::from([("cloth-config".to_string(), s(&[">=11.1.106"]))]),
+            nested: vec![ModMeta { id: "cloth-config".into(), version: "11.0.99".into(), ..Default::default() }],
+            ..Default::default()
+        };
+        let cloth = ModMeta { id: "cloth-config".into(), version: "11.1.136".into(), ..Default::default() };
+        assert!(check_mods(&[user.clone(), cloth], "1.20.1", Some(17), "").is_empty());
+        let p = check_mods(&[user], "1.20.1", Some(17), "");
+        assert!(p[0].message.contains("11.0.99"));
     }
 }

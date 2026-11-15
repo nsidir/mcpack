@@ -242,6 +242,8 @@ export interface Backend {
   deletePack(packId: string, files: boolean): Promise<void>;
   /** Open a web page in the default browser. */
   openUrl(url: string): Promise<void>;
+  /** Open the pack's instance folder (or the pack folder) in the system file manager. */
+  openFolder(packId: string, profile: string, what: "instance" | "pack"): Promise<void>;
   removeContent(packId: string, slug: string): Promise<void>;
   updateContent(packId: string, slug: string): Promise<void>;
   resolve(packId: string): Promise<void>;

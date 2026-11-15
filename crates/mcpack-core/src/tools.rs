@@ -164,6 +164,12 @@ pub fn all_definitions() -> Vec<Value> {
             json!({"pack": p_pack(), "files": {"type": "boolean", "description": "also delete the pack folder (default false)"}}),
             &["pack"],
         ),
+        tool(
+            "open_folder",
+            "Open a pack's instance folder (game dir: mods, config, saves, logs) or the pack folder in the system file manager. Returns the path.",
+            json!({"pack": p_pack(), "profile": p_profile(), "what": {"type": "string", "enum": ["instance", "pack"], "description": "default instance"}}),
+            &["pack"],
+        ),
         tool("pack_show", "Pack summary: settings, profiles, resolved content (with dependency flags), lock state, running sessions.", json!({"pack": p_pack()}), &["pack"]),
         tool("pack_get", "Read a pack.toml value by path (e.g. jvm.memory, profiles.test, mods[0]).", json!({"pack": p_pack(), "path": {"type": "string"}}), &["pack"]),
         tool(
@@ -322,6 +328,21 @@ fn u(a: &Value, k: &str) -> Option<u64> {
 fn pack_arg(a: &Value) -> Result<PathBuf> {
     s(a, "pack").or_else(|| s(a, "packId")).or_else(|| s(a, "dir")).map(PathBuf::from).ok_or_else(|| Error::Invalid("missing required argument `pack`".into()))
 }
+fn open_in_file_manager(dir: &Path) -> Result<()> {
+    let program = if cfg!(windows) {
+        "explorer"
+    } else if cfg!(target_os = "macos") {
+        "open"
+    } else {
+        "xdg-open"
+    };
+    std::process::Command::new(program)
+        .arg(dir)
+        .spawn()
+        .map(|_| ())
+        .map_err(|e| Error::Other(format!("could not open {} with {program}: {e}", dir.display())))
+}
+
 fn profile_arg(a: &Value) -> String {
     s(a, "profile").unwrap_or_else(|| DEFAULT_PROFILE.to_string())
 }
@@ -380,6 +401,7 @@ fn spec_from_args(a: &Value) -> Result<ModSpec> {
         sha1: s(a, "sha1"),
         filename: s(a, "filename"),
         optional_deps: b(a, "optional_deps"),
+        deps: None,
     };
     Ok(spec)
 }
@@ -523,6 +545,22 @@ async fn dispatch(l: &Launcher, tool: &str, a: &Value) -> Result<Value> {
             let d = pack_arg(a)?;
             let d = std::path::absolute(&d).unwrap_or(d);
             Ok(json!({"removed": registry::forget_pack(&l.ctx.paths, &d.display().to_string())}))
+        }
+        "open_folder" => {
+            let d = pack_arg(a)?;
+            let d = std::path::absolute(crate::pack::pack_dir(&d)).unwrap_or(d);
+            let target = match s(a, "what").as_deref() {
+                None | Some("instance") => crate::paths::instance_dir(&d, &profile_arg(a)),
+                Some("pack") => d.clone(),
+                Some(other) => return Err(Error::Invalid(format!("what must be instance or pack, not '{other}'"))),
+            };
+            if !d.join(crate::pack::PACK_FILE).exists() {
+                return Err(Error::NotFound(format!("no pack at {}", d.display())));
+            }
+            // The instance folder appears on first sync/launch; create it so there is something to open.
+            crate::util::ensure_dir(&target)?;
+            open_in_file_manager(&target)?;
+            Ok(json!({"opened": target.display().to_string()}))
         }
         "pack_delete" => {
             let d = pack_arg(a)?;

@@ -12,7 +12,7 @@ use crate::error::Error;
 /// one group (enforced by a test).
 pub const GROUPS: &[(&str, &str, &[&str])] = &[
     ("start", "Orient yourself", &["overview", "help", "app_info", "activity"]),
-    ("packs", "Packs", &["pack_list", "pack_init", "pack_show", "pack_delete", "pack_forget", "import_pack", "export_pack"]),
+    ("packs", "Packs", &["pack_list", "pack_init", "pack_show", "pack_delete", "pack_forget", "open_folder", "import_pack", "export_pack"]),
     ("settings", "Pack settings", &["pack_get", "pack_set", "pack_unset", "profile_show", "config_get", "config_set"]),
     ("content", "Mods and content", &["search_mods", "mod_versions", "pack_add", "pack_remove", "update", "check_updates", "resolve"]),
     ("check", "Check and repair", &["check", "doctor", "diagnose", "sync", "install"]),

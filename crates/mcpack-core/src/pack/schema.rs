@@ -216,6 +216,11 @@ pub struct ModSpec {
     /// Also install optional dependencies.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub optional_deps: Option<bool>,
+    /// Resolve this entry's required dependencies (default true). Imported modpacks set
+    /// `false`: their manifest already lists every file, and CurseForge dependency metadata
+    /// is per project, so it can name projects for another loader (e.g. Forge-only ones).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub deps: Option<bool>,
 }
 
 impl ModSpec {
