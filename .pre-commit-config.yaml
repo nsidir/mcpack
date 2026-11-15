@@ -1,0 +1,75 @@
+# Git hooks for mcpack, run by prek (or pre-commit). Install once per clone:
+#   prek install            # installs pre-commit and pre-push hooks (see default_install_hook_types)
+# Run everything by hand:   prek run --all-files
+# Bump the version:         python scripts/version.py bump patch|minor|major|X.Y.Z
+default_install_hook_types: [pre-commit, pre-push]
+default_stages: [pre-commit]
+
+repos:
+  - repo: builtin
+    hooks:
+      - id: check-merge-conflict
+      - id: check-case-conflict
+      - id: check-added-large-files
+        args: [--maxkb=1024]
+      - id: check-yaml
+      - id: check-toml
+      - id: check-json
+      - id: detect-private-key
+
+  - repo: local
+    hooks:
+      # Versions -----------------------------------------------------------------
+      - id: version-sync
+        name: version numbers in sync (Cargo, app, package.json, tauri.conf, lockfiles)
+        entry: python scripts/version.py check
+        language: system
+        pass_filenames: false
+        files: ^(Cargo\.(toml|lock)|app/package\.json|app/src-tauri/(Cargo\.(toml|lock)|tauri\.conf\.json)|scripts/version\.py)$
+        stages: [pre-commit, pre-push]
+
+      # Secrets and junk ---------------------------------------------------------
+      - id: no-api-keys
+        name: no API keys
+        entry: python scripts/check_secrets.py
+        language: system
+        types: [text]
+        exclude: ^scripts/check_secrets\.py$
+
+      - id: no-build-artifacts
+        name: no stray archives, binaries or crash dumps
+        entry: "do not commit build outputs, modpack archives, launcher binaries or crash dumps:"
+        language: fail
+        files: \.(stackdump|zip|mrpack|exe|dll|msi)$|(^|/)SKlauncher[^/]*\.jar$
+
+      # Rust ---------------------------------------------------------------------
+      - id: cargo-check
+        name: cargo check (workspace)
+        entry: cargo check --workspace --all-targets --quiet
+        language: system
+        pass_filenames: false
+        files: ^(crates/|Cargo\.(toml|lock)$|agent-mod/dist/)
+
+      - id: cargo-check-app
+        name: cargo check (desktop app)
+        entry: cargo check --manifest-path app/src-tauri/Cargo.toml --quiet
+        language: system
+        pass_filenames: false
+        files: ^(app/src-tauri/|crates/mcpack-core/)
+
+      # Desktop UI ---------------------------------------------------------------
+      - id: app-typecheck
+        name: app typecheck (tsc)
+        entry: pnpm -C app exec tsc --noEmit
+        language: system
+        pass_filenames: false
+        files: ^app/(src/|package\.json|tsconfig[^/]*\.json)
+
+      # Before pushing -----------------------------------------------------------
+      - id: cargo-test
+        name: cargo test (core)
+        entry: cargo test --workspace --quiet
+        language: system
+        pass_filenames: false
+        always_run: true
+        stages: [pre-push]

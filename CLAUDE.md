@@ -9,4 +9,9 @@ desktop UI (`app/`, Tauri 2 + React; its `src-tauri` is a standalone crate).
 - Errors: `mcpack_core::Error` with stable `code()`; tool results are JSON.
 - `cargo test` (core unit tests), `cargo build`; app: `cd app && pnpm tauri dev`.
 - Agent mod: `cd agent-mod && ./gradlew dist` (Gradle 8.14 + Loom 1.11, Java 21; build output embedded by core's build.rs).
+- Versions: never edit by hand; `python scripts/version.py bump patch|minor|major|X.Y.Z` updates all
+  eight places (both Cargo.toml, package.json, tauri.conf.json, both Cargo.lock). The agent mod is versioned separately.
+- Git hooks (prek, `.pre-commit-config.yaml`; `prek install` once per clone): pre-commit checks version sync,
+  API keys, stray archives/binaries, cargo check (workspace + app), app tsc; pre-push also runs `cargo test`.
+  Never bypass with `--no-verify`; fix the cause. A CurseForge key never goes in the repo (env `MCPACK_CURSEFORGE_API_KEY`).
 - Supported: Fabric/Quilt; agent for MC 1.20.1 and 1.21.1. Forge/NeoForge intentionally not implemented yet.
