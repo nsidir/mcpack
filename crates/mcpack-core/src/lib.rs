@@ -841,6 +841,9 @@ impl Launcher {
         let mut c = self.ctx.cfg();
         if c.curseforge_api_key.is_some() {
             c.curseforge_api_key = Some("<set>".into());
+        } else if crate::source::curseforge::effective_key(None).is_some() {
+            // The launcher's own key compiled into this build; never persisted to config.toml.
+            c.curseforge_api_key = Some("<built-in>".into());
         }
         c
     }
@@ -849,6 +852,7 @@ impl Launcher {
     pub fn config_set(&self, key: &str, value: &str) -> Result<GlobalConfig> {
         let mut c = GlobalConfig::load(&self.ctx.paths)?;
         match key {
+            "curseforge_api_key" if matches!(value, "<set>" | "<built-in>" | "<redacted>") => {}
             "curseforge_api_key" => c.curseforge_api_key = Some(value.to_string()).filter(|v| !v.is_empty()),
             "username" => c.username = value.to_string(),
             "java_path" => c.java_path = Some(value.to_string()).filter(|v| !v.is_empty()),

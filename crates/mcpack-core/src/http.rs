@@ -75,13 +75,31 @@ impl Http {
     where
         F: Fn(reqwest::RequestBuilder) -> reqwest::RequestBuilder,
     {
+        self.send_with(reqwest::Method::GET, url, build).await
+    }
+
+    /// POST a JSON body and parse a JSON response, with the same retry policy as GETs.
+    pub async fn post_json_with<T, B, F>(&self, url: &str, body: &B, build: F) -> Result<T>
+    where
+        T: DeserializeOwned,
+        B: Serialize + ?Sized,
+        F: Fn(reqwest::RequestBuilder) -> reqwest::RequestBuilder,
+    {
+        let bytes = self.send_with(reqwest::Method::POST, url, |r| build(r.json(body))).await?;
+        serde_json::from_slice(&bytes).map_err(|e| Error::Other(format!("invalid JSON from {url}: {e}")))
+    }
+
+    async fn send_with<F>(&self, method: reqwest::Method, url: &str, build: F) -> Result<Vec<u8>>
+    where
+        F: Fn(reqwest::RequestBuilder) -> reqwest::RequestBuilder,
+    {
         let mut last_err = None;
         for attempt in 0..4u32 {
             if attempt > 0 {
                 tokio::time::sleep(Duration::from_millis(400 * 2u64.pow(attempt))).await;
             }
             let _permit = self.sem.acquire().await.expect("semaphore closed");
-            let resp = match build(self.client.get(url)).send().await {
+            let resp = match build(self.client.request(method.clone(), url)).send().await {
                 Ok(r) => r,
                 Err(e) => {
                     last_err = Some(Error::Http(e));

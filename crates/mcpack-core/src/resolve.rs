@@ -1,6 +1,6 @@
 //! Turn `pack.toml` specs into a fully pinned `pack.lock` (with dependency closure).
 
-use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 use std::path::Path;
 
 use serde::Serialize;
@@ -64,6 +64,9 @@ struct Resolver<'a> {
     policy: UpdatePolicy,
     mr: Modrinth,
     cf: Option<CurseForge>,
+    /// Exact versions pinned by top-level specs (`source:id` -> version), so a dependency
+    /// that is also pinned (e.g. by an imported CurseForge manifest) gets that version, not latest.
+    pins: HashMap<String, String>,
     entries: BTreeMap<String, LockEntry>,
     warnings: Vec<String>,
     errors: Vec<String>,
@@ -87,6 +90,29 @@ pub async fn resolve(ctx: &Ctx, pack: &Pack, old: Option<&LockFile>, policy: Upd
 
     let needs_cf = pack.all_specs().iter().any(|s| s.source == Source::Curseforge);
     let cf = if needs_cf { Some(CurseForge::new(ctx.http.clone(), ctx.cfg().curseforge_api_key)?) } else { None };
+    let mut pins = HashMap::new();
+    for s in pack.all_specs() {
+        if let (Source::Modrinth | Source::Curseforge, Some(id)) = (s.source, &s.id) {
+            let v = s.version_spec();
+            if !v.is_empty() && v != "latest" {
+                pins.insert(format!("{}:{id}", s.source.as_str()), v.to_string());
+            }
+        }
+    }
+    if let Some(cf) = &cf {
+        // Batch-fetch every pinned CurseForge file (modpack imports pin hundreds).
+        let ids: Vec<u64> = pack
+            .all_specs()
+            .iter()
+            .filter(|s| s.source == Source::Curseforge)
+            .filter_map(|s| s.version.as_deref()?.parse().ok())
+            .collect();
+        if !ids.is_empty() {
+            if let Err(e) = cf.prefetch(&ids).await {
+                tracing::debug!("CurseForge batch prefetch failed, falling back to per-file requests: {e}");
+            }
+        }
+    }
 
     let mut r = Resolver {
         ctx,
@@ -97,6 +123,7 @@ pub async fn resolve(ctx: &Ctx, pack: &Pack, old: Option<&LockFile>, policy: Upd
         policy,
         mr: Modrinth::new(ctx.http.clone()),
         cf,
+        pins,
         entries: BTreeMap::new(),
         warnings: Vec::new(),
         errors: Vec::new(),
@@ -117,6 +144,8 @@ pub async fn resolve(ctx: &Ctx, pack: &Pack, old: Option<&LockFile>, policy: Upd
     if !r.errors.is_empty() {
         return Err(Error::Resolve(r.errors.join("\n")));
     }
+
+    r.fill_manual_from_modrinth().await;
 
     // Incompatibility report.
     let keys: BTreeSet<String> = r.entries.keys().cloned().collect();
@@ -282,6 +311,17 @@ impl<'a> Resolver<'a> {
     }
 
     async fn fetch_dep(&mut self, source: Source, dep: &DepRef) -> Result<ResolvedVersion> {
+        if let Some(pid) = &dep.project_id {
+            if let Some(v) = self.pins.get(&format!("{}:{pid}", source.as_str())).cloned() {
+                return match source {
+                    Source::Curseforge => {
+                        let cf = self.cf.clone().ok_or_else(|| Error::Config("CurseForge client unavailable".into()))?;
+                        cf.resolve(pid, &v, None, None, &self.mc, self.loader, &mut self.warnings).await
+                    }
+                    _ => self.mr.resolve(pid, &v, None, None, &self.mc, self.loader, &mut self.warnings).await,
+                };
+            }
+        }
         match source {
             Source::Curseforge => {
                 let cf = self.cf.clone().ok_or_else(|| Error::Config("CurseForge client unavailable".into()))?;
@@ -359,6 +399,41 @@ impl<'a> Resolver<'a> {
             }
         }
         Ok(root_key)
+    }
+
+    /// CurseForge files whose authors disallow third-party downloads have no URL. Many are
+    /// mirrored byte-for-byte on Modrinth, so look them up by SHA-1 and download from there;
+    /// whatever is still missing must be downloaded manually.
+    async fn fill_manual_from_modrinth(&mut self) {
+        let hashes: Vec<String> = self
+            .entries
+            .values()
+            .filter(|e| e.manual && e.source == Source::Curseforge)
+            .filter_map(|e| e.sha1.clone())
+            .collect();
+        if !hashes.is_empty() {
+            match self.mr.files_by_sha1(&hashes).await {
+                Ok(found) => {
+                    for e in self.entries.values_mut().filter(|e| e.manual && e.source == Source::Curseforge) {
+                        if let Some(f) = e.sha1.as_ref().and_then(|h| found.get(&h.to_ascii_lowercase())) {
+                            e.url = Some(f.url.clone());
+                            e.size = e.size.or(f.size);
+                            e.manual = false;
+                            self.warnings.push(format!("{} ({}): CurseForge disallows API downloads; using the identical file from Modrinth", e.name, e.filename));
+                        }
+                    }
+                }
+                Err(err) => self.warnings.push(format!("Modrinth hash lookup for CurseForge-restricted files failed: {err}")),
+            }
+        }
+        for e in self.entries.values().filter(|e| e.manual && e.source == Source::Curseforge) {
+            self.warnings.push(format!(
+                "{} ({}) disallows third-party downloads; download it manually from {} and place it in <pack>/manual/ or your Downloads folder",
+                e.name,
+                e.filename,
+                e.page_url.as_deref().unwrap_or("CurseForge")
+            ));
+        }
     }
 
     async fn url_entry(&mut self, spec: &ModSpec) -> Result<String> {

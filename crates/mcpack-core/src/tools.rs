@@ -291,7 +291,7 @@ pub fn all_definitions() -> Vec<Value> {
         ),
         tool(
             "import_pack",
-            "Import a modpack archive (.mrpack or CurseForge .zip, auto-detected) into a new pack directory (default <home>/packs/<name>).",
+            "Import a modpack archive (.mrpack or CurseForge .zip, auto-detected) into a new pack directory (default <home>/packs/<name>). CurseForge files are fetched in batches with the configured (or built-in) API key; files whose authors block API downloads are taken from Modrinth by SHA-1 when identical, otherwise reported as manual downloads.",
             json!({"file": {"type": "string"}, "dir": {"type": "string"}, "resolve": {"type": "boolean"}}),
             &["file"],
         ),

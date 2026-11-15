@@ -133,6 +133,23 @@ impl Modrinth {
         })
     }
 
+    /// Look up versions by file SHA-1 (`POST /version_files`). Returns `sha1 -> download file`
+    /// for every hash Modrinth knows; unknown hashes are simply absent.
+    pub async fn files_by_sha1(&self, hashes: &[String]) -> Result<std::collections::HashMap<String, VFile>> {
+        let mut out = std::collections::HashMap::new();
+        for chunk in hashes.chunks(500) {
+            let body = serde_json::json!({ "hashes": chunk, "algorithm": "sha1" });
+            let map: std::collections::HashMap<String, Version> =
+                self.http.post_json_with(&format!("{API}/version_files"), &body, |r| r).await?;
+            for (hash, v) in map {
+                if let Some(f) = v.files.into_iter().find(|f| f.hashes.sha1.as_deref().is_some_and(|s| s.eq_ignore_ascii_case(&hash))) {
+                    out.insert(hash.to_ascii_lowercase(), f);
+                }
+            }
+        }
+        Ok(out)
+    }
+
     pub async fn versions(
         &self,
         project: &str,

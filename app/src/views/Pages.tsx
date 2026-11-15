@@ -280,9 +280,18 @@ export function SettingsPage() {
                 <div className="grow">
                   <label className="label row" htmlFor="s-cf">
                     CurseForge API key
-                    {config.curseforge_api_key ? <Badge tone="ok">Set</Badge> : <Badge>Not set</Badge>}
+                    {config.curseforge_api_key === "<built-in>" ? (
+                      <Badge tone="ok">Built-in</Badge>
+                    ) : config.curseforge_api_key ? (
+                      <Badge tone="ok">Set</Badge>
+                    ) : (
+                      <Badge>Not set</Badge>
+                    )}
                   </label>
-                  <div className="desc">Required to add content from CurseForge. Modrinth needs no key.</div>
+                  <div className="desc">
+                    Required to add content from CurseForge. Modrinth needs no key.
+                    {config.curseforge_api_key === "<built-in>" && " This build includes a key; paste your own to override it."}
+                  </div>
                 </div>
                 <div className="row" style={{ gap: 4 }}>
                   <CommitInput
@@ -290,7 +299,7 @@ export function SettingsPage() {
                     className="input mono"
                     type={reveal ? "text" : "password"}
                     placeholder="Paste key"
-                    value={config.curseforge_api_key ?? ""}
+                    value={config.curseforge_api_key === "<built-in>" ? "" : config.curseforge_api_key ?? ""}
                     onCommit={(v) => set({ curseforge_api_key: v.trim() || null })}
                   />
                   <IconButton label={reveal ? "Hide key" : "Show key"} onClick={() => setReveal(!reveal)}>

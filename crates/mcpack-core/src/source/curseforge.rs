@@ -1,5 +1,8 @@
 //! CurseForge API v1 client (requires an API key).
 
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
+
 use serde::Deserialize;
 
 use super::{DepRef, ResolvedVersion, SearchFilters, SearchHit, VersionSummary};
@@ -107,20 +110,91 @@ fn release_type_str(t: u32) -> &'static str {
     }
 }
 
+/// Key baked in at build time (`MCPACK_CURSEFORGE_API_KEY`), used when the user has not set one.
+/// Release builds can ship the launcher's own CurseForge developer key this way so players can
+/// install CurseForge packs without registering for a key.
+pub const BUILTIN_KEY: Option<&str> = option_env!("MCPACK_CURSEFORGE_API_KEY");
+
+/// The user's key if set, else the built-in one.
+pub fn effective_key(user: Option<String>) -> Option<String> {
+    user.filter(|k| !k.trim().is_empty())
+        .or_else(|| BUILTIN_KEY.map(str::to_string).filter(|k| !k.trim().is_empty()))
+}
+
+/// Batch endpoints accept many ids per request; keep requests reasonably small.
+const BATCH: usize = 200;
+
+#[derive(Default)]
+struct Cache {
+    mods: HashMap<u64, CfMod>,
+    files: HashMap<u64, CfFile>,
+}
+
 #[derive(Clone)]
 pub struct CurseForge {
     http: Http,
     key: String,
+    cache: Arc<Mutex<Cache>>,
 }
 
 impl CurseForge {
     pub fn new(http: Http, key: Option<String>) -> Result<Self> {
-        let key = key.filter(|k| !k.trim().is_empty()).ok_or_else(|| {
+        let key = effective_key(key).ok_or_else(|| {
             Error::Config(
                 "CurseForge requires an API key: set CURSEFORGE_API_KEY or `curseforge_api_key` in the mcpack config.toml (get one at https://console.curseforge.com)".into(),
             )
         })?;
-        Ok(Self { http, key })
+        Ok(Self { http, key, cache: Default::default() })
+    }
+
+    async fn post<T: serde::de::DeserializeOwned>(&self, path: &str, body: &serde_json::Value) -> Result<T> {
+        let key = self.key.clone();
+        let d: Data<T> = self
+            .http
+            .post_json_with(&format!("{API}{path}"), body, |r| r.header("x-api-key", &key).header("Accept", "application/json"))
+            .await?;
+        Ok(d.data)
+    }
+
+    /// Fetch many pinned files and their projects in a few batched requests
+    /// (`POST /mods/files`, `POST /mods`) so later `resolve` calls hit the cache.
+    /// Used for modpack imports, where hundreds of exact file ids are known up front.
+    pub async fn prefetch(&self, file_ids: &[u64]) -> Result<()> {
+        let want: Vec<u64> = {
+            let c = self.cache.lock().unwrap();
+            file_ids.iter().copied().filter(|f| !c.files.contains_key(f)).collect()
+        };
+        let mut mod_ids = Vec::new();
+        for chunk in want.chunks(BATCH) {
+            let files: Vec<CfFile> = self.post("/mods/files", &serde_json::json!({ "fileIds": chunk })).await?;
+            let mut c = self.cache.lock().unwrap();
+            for f in files {
+                if !c.mods.contains_key(&f.mod_id) {
+                    mod_ids.push(f.mod_id);
+                }
+                c.files.insert(f.id, f);
+            }
+        }
+        mod_ids.sort_unstable();
+        mod_ids.dedup();
+        for chunk in mod_ids.chunks(BATCH) {
+            let mods: Vec<CfMod> = self.post("/mods", &serde_json::json!({ "modIds": chunk })).await?;
+            let mut c = self.cache.lock().unwrap();
+            for m in mods {
+                c.mods.insert(m.id, m);
+            }
+        }
+        Ok(())
+    }
+
+    /// `GET /mods/{mod}/files/{file}/download-url`: sometimes yields a URL when the file
+    /// metadata has none. `None` when CurseForge still refuses (author opted out).
+    async fn download_url(&self, mod_id: u64, file_id: u64) -> Option<String> {
+        self.get::<Option<String>>(&format!("/mods/{mod_id}/files/{file_id}/download-url"), &[])
+            .await
+            .ok()
+            .flatten()
+            .filter(|u| !u.trim().is_empty())
     }
 
     async fn get<T: serde::de::DeserializeOwned>(&self, path: &str, q: &[(&str, String)]) -> Result<T> {
@@ -134,6 +208,9 @@ impl CurseForge {
 
     pub async fn get_mod(&self, id_or_slug: &str) -> Result<CfMod> {
         if let Ok(id) = id_or_slug.parse::<u64>() {
+            if let Some(m) = self.cache.lock().unwrap().mods.get(&id) {
+                return Ok(m.clone());
+            }
             return self.get(&format!("/mods/{id}"), &[]).await.map_err(|e| match e {
                 Error::HttpStatus { status: 404, .. } => Error::NotFound(format!("CurseForge mod {id}")),
                 other => other,
@@ -167,6 +244,9 @@ impl CurseForge {
     }
 
     async fn file(&self, mod_id: u64, file_id: u64) -> Result<CfFile> {
+        if let Some(f) = self.cache.lock().unwrap().files.get(&file_id).filter(|f| f.mod_id == mod_id) {
+            return Ok(f.clone());
+        }
         self.get(&format!("/mods/{mod_id}/files/{file_id}"), &[]).await
     }
 
@@ -251,7 +331,7 @@ impl CurseForge {
     ) -> Result<ResolvedVersion> {
         let m = self.get_mod(id).await?;
         let kind = kind_hint.unwrap_or_else(|| kind_from_class(m.class_id));
-        let file = if version_spec == "latest" || version_spec.is_empty() {
+        let mut file = if version_spec == "latest" || version_spec.is_empty() {
             let files = self.candidate_files(&m, kind, mc, loader).await?;
             let ch = channel.unwrap_or(Channel::Release);
             match files.iter().find(|f| ch.allows(release_type_str(f.release_type))) {
@@ -279,7 +359,10 @@ impl CurseForge {
                 .find(|f| f.display_name == version_spec || f.file_name == version_spec || f.display_name.contains(version_spec))
                 .ok_or_else(|| Error::Resolve(format!("'{}' has no file matching '{version_spec}'", m.name)))?
         };
-        Ok(self.to_resolved(&m, kind, &file, warnings))
+        if file.download_url.is_none() {
+            file.download_url = self.download_url(m.id, file.id).await;
+        }
+        Ok(self.to_resolved(&m, kind, &file))
     }
 
     pub async fn resolve_dep(&self, dep: &DepRef, mc: &str, loader: LoaderKind, warnings: &mut Vec<String>) -> Result<ResolvedVersion> {
@@ -290,7 +373,7 @@ impl CurseForge {
         self.resolve(pid, "latest", None, None, mc, loader, warnings).await
     }
 
-    fn to_resolved(&self, m: &CfMod, kind: ModKind, f: &CfFile, warnings: &mut Vec<String>) -> ResolvedVersion {
+    fn to_resolved(&self, m: &CfMod, kind: ModKind, f: &CfFile) -> ResolvedVersion {
         let mut required = Vec::new();
         let mut optional = Vec::new();
         let mut incompatible = Vec::new();
@@ -308,14 +391,6 @@ impl CurseForge {
             .as_ref()
             .and_then(|l| l.website_url.clone())
             .map(|u| format!("{}/files/{}", u.trim_end_matches('/'), f.id));
-        if f.download_url.is_none() {
-            warnings.push(format!(
-                "{} ({}) disallows third-party downloads; download it manually from {} and place it in <pack>/manual/ or your Downloads folder",
-                m.name,
-                f.file_name,
-                page.as_deref().unwrap_or("CurseForge")
-            ));
-        }
         ResolvedVersion {
             source: Source::Curseforge,
             project_id: m.id.to_string(),
