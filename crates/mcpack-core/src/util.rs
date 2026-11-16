@@ -117,6 +117,11 @@ pub fn maven_path(name: &str) -> Result<String> {
     Ok(format!("{group}/{artifact}/{version}/{file}"))
 }
 
+/// Version part of a maven coordinate.
+pub fn maven_version(name: &str) -> Option<&str> {
+    name.split('@').next().unwrap_or(name).split(':').nth(2)
+}
+
 /// `group:artifact[:classifier]` – identity of a library ignoring version.
 pub fn maven_key(name: &str) -> String {
     let coord = name.split('@').next().unwrap_or(name);

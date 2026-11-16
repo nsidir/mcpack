@@ -145,7 +145,6 @@ impl Pack {
                 username = p.username.clone();
             }
         }
-        let loader = f.pack.loader.kind;
         Ok(EffectiveProfile {
             name: profile.to_string(),
             minecraft: f.pack.minecraft.clone(),
@@ -154,7 +153,7 @@ impl Pack {
             options,
             config,
             mods,
-            agent: agent.unwrap_or(loader != LoaderKind::Vanilla),
+            agent: agent.unwrap_or(true),
             username,
         })
     }

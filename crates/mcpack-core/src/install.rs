@@ -13,6 +13,8 @@ use crate::meta::mojang::{self, AssetIndex, VersionJson, VersionManifest};
 use crate::util;
 use crate::Ctx;
 
+pub mod forge;
+
 /// Everything needed to build a launch command.
 #[derive(Debug, Clone)]
 pub struct GameInstall {
@@ -25,6 +27,14 @@ pub struct GameInstall {
     pub assets_index: String,
     pub java: PathBuf,
     pub java_major: Option<u32>,
+    pub minecraft: String,
+    pub loader: LoaderKind,
+    pub loader_version: String,
+    /// Pre-1.6 versions read sounds and other assets from `<game dir>/resources`: this is the
+    /// asset tree to mirror there at launch.
+    pub legacy_resources: Option<PathBuf>,
+    /// Files to place in the game directory at launch: (cached file, path relative to the game dir).
+    pub game_dir_files: Vec<(PathBuf, String)>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -101,6 +111,9 @@ async fn vanilla_json(ctx: &Ctx, mc: &str) -> Result<VersionJson> {
 }
 
 async fn loader_json(ctx: &Ctx, kind: LoaderKind, mc: &str, loader_version: &str) -> Result<VersionJson> {
+    if kind.is_forge_like() {
+        return forge::loader_json(ctx, kind, mc, loader_version).await;
+    }
     let id = format!("{}-{}-{}", kind.as_str(), loader_version, mc);
     let path = ctx.paths.versions().join(&id).join(format!("{id}.json"));
     if path.exists() {
@@ -144,16 +157,28 @@ pub async fn install(
         .as_ref()
         .map(|d| d.client.clone())
         .ok_or_else(|| Error::Launch(format!("version {mc} has no client download")))?;
-    let client_jar = ctx.paths.versions().join(mc).join(format!("{mc}.jar"));
-    items.push(DownloadItem { url: client.url.clone(), dest: client_jar.clone(), sha1: client.sha1.clone(), size: client.size });
+    let vanilla_jar = ctx.paths.versions().join(mc).join(format!("{mc}.jar"));
+    items.push(DownloadItem { url: client.url.clone(), dest: vanilla_jar.clone(), sha1: client.sha1.clone(), size: client.size });
+    // Forge 1.17+ / NeoForge leave `${version_name}.jar` off their module path (it is the
+    // unpatched game), so the classpath copy must carry that name.
+    let client_jar = if kind.is_forge_like() {
+        ctx.paths.versions().join(forge::version_id(kind, mc, loader_version)).join(format!("{}.jar", version.id))
+    } else {
+        vanilla_jar.clone()
+    };
 
     // Libraries.
     let mut classpath = Vec::new();
     let mut natives_jars = Vec::new();
+    let mut local_only = Vec::new();
     for lib in &version.libraries {
         for f in lib.files(p)? {
             let dest = ctx.paths.libraries().join(&f.path);
-            items.push(DownloadItem { url: f.url.clone(), dest: dest.clone(), sha1: f.sha1.clone(), size: f.size });
+            if f.url.is_empty() {
+                local_only.push(dest.clone());
+            } else {
+                items.push(DownloadItem { url: f.url.clone(), dest: dest.clone(), sha1: f.sha1.clone(), size: f.size });
+            }
             if f.extract_natives {
                 natives_jars.push(dest);
             } else {
@@ -167,6 +192,16 @@ pub async fn install(
         }
     }
     classpath.push(client_jar.clone());
+    // Tools the Forge/NeoForge installer runs (only until they have run once).
+    if kind.is_forge_like() {
+        for lib in forge::processor_libraries(ctx, kind, mc, loader_version)? {
+            for f in lib.files(p)? {
+                if !f.url.is_empty() {
+                    items.push(DownloadItem { url: f.url, dest: ctx.paths.libraries().join(&f.path), sha1: f.sha1, size: f.size });
+                }
+            }
+        }
+    }
 
     // Asset index.
     let idx_ref = version
@@ -201,6 +236,7 @@ pub async fn install(
         .await?;
 
     // Legacy virtual assets.
+    let mut legacy_resources = None;
     if index.is_virtual || index.map_to_resources {
         let vroot = ctx.paths.assets().join("virtual").join(&idx_ref.id);
         for (name, obj) in &index.objects {
@@ -209,6 +245,17 @@ pub async fn install(
                 let src = ctx.paths.assets().join("objects").join(&obj.hash[..2]).join(&obj.hash);
                 util::link_or_copy(&src, &dest)?;
             }
+        }
+        if index.map_to_resources {
+            legacy_resources = Some(vroot);
+        }
+    }
+
+    if client_jar != vanilla_jar {
+        let fresh = std::fs::metadata(&client_jar).map(|m| m.len()).ok() == std::fs::metadata(&vanilla_jar).map(|m| m.len()).ok();
+        if !fresh {
+            let _ = std::fs::remove_file(&client_jar);
+            util::link_or_copy(&vanilla_jar, &client_jar)?;
         }
     }
 
@@ -220,6 +267,18 @@ pub async fn install(
     progress("java", None, "preparing Java runtime".into());
     let (java, java_major) = select_java(ctx, &version, java_override).await?;
     progress("java", Some(1.0), format!("Java {}", java_major.map(|m| m.to_string()).unwrap_or_else(|| "?".into())));
+
+    let game_dir_files = Vec::new();
+    if kind.is_forge_like() {
+        forge::run_processors(ctx, kind, mc, loader_version, &java, &vanilla_jar, progress).await?;
+    }
+    if let Some(missing) = local_only.iter().find(|p| !p.exists()) {
+        return Err(Error::Launch(format!(
+            "{} {loader_version} install is incomplete: {} is missing",
+            kind.display(),
+            missing.display()
+        )));
+    }
 
     let summary = InstallSummary {
         version_id: version.id.clone(),
@@ -242,6 +301,11 @@ pub async fn install(
             assets_index: idx_ref.id,
             java,
             java_major,
+            minecraft: mc.to_string(),
+            loader: kind,
+            loader_version: loader_version.to_string(),
+            legacy_resources,
+            game_dir_files,
         },
         summary,
     ))
@@ -321,3 +385,23 @@ fn extract_natives(jars: &[PathBuf], dir: &Path) -> Result<()> {
     std::fs::write(&marker, sig).ctx(&marker)?;
     Ok(())
 }
+
+/// Mirror pre-1.6 assets into `<game dir>/resources` (hard links; only missing files).
+pub fn link_legacy_resources(inst: &GameInstall, game_dir: &Path) -> Result<()> {
+    for (src, rel) in &inst.game_dir_files {
+        let dest = game_dir.join(rel);
+        if !dest.exists() {
+            util::link_or_copy(src, &dest)?;
+        }
+    }
+    let Some(root) = &inst.legacy_resources else { return Ok(()) };
+    let target = game_dir.join("resources");
+    for rel in util::walk_files(root)? {
+        let dest = target.join(&rel);
+        if !dest.exists() {
+            util::link_or_copy(&root.join(&rel), &dest)?;
+        }
+    }
+    Ok(())
+}
+

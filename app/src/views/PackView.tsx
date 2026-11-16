@@ -1,13 +1,13 @@
 import { Bot, Boxes, Check, Copy, FolderOpen, Gauge, LoaderCircle, Play, RefreshCw, RotateCw, Square, SquareTerminal, Trash2, Upload } from "lucide-react";
 import { type CSSProperties, type ReactNode, useMemo, useState } from "react";
-import { backend, type InstanceState, type Pack, PHASES } from "../api";
+import { backend, type InstanceState, LOADER_LABEL, type Loader, type Pack, PHASES } from "../api";
 import { Badge, Button, copy, Dot, fmt, IconButton, useNow } from "../components/ui";
 import { launch, openFolder, type PackTab, pendingRestart, profileOf, restartGame, setProfile, stateLabel, stop, useStore } from "../store";
 import { HotReloadPanel } from "./HotReload";
 import { AgentTab, ConsoleTab, ContentTab } from "./PackTabs";
 import { OriginBadge, StatusIcon } from "./Pages";
 
-const cap = (s: string) => s[0].toUpperCase() + s.slice(1);
+const cap = (s: string) => LOADER_LABEL[s as Loader] ?? s[0].toUpperCase() + s.slice(1);
 
 export function PackView({ pack }: { pack: Pack }) {
   const tab = useStore((s) => s.tab);

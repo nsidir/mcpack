@@ -17,8 +17,11 @@ same operations work from the **desktop app**, the **`mcpack` CLI**, scripts, or
   rebuilt mods can have their code hot-swapped into the running game (`dev.hotswap`), and
   changes that need a restart are reported with the reason (or restart the game and rejoin
   your world automatically with `dev.restart = "auto"`).
-- Fabric and Quilt on Minecraft 1.20.1 and 1.21.1 (in-game agent); vanilla on any version.
-  Modrinth and CurseForge (needs an API key). Offline accounts.
+- **Every loader, every version**: vanilla, Fabric, Quilt, Forge and NeoForge on any Minecraft
+  version they exist for (Forge from 1.6 on, installed from its official installer). The
+  in-game agent (status, commands, worlds, screenshots, live reload) works on all of them from
+  Minecraft 1.14.4 on, and on vanilla and Forge 1.7.10 – 1.12.2 (not 1.13 – 1.14.3). Modrinth and CurseForge, `.mrpack` and
+  CurseForge `.zip` import/export for all loaders. Offline accounts.
 
 ## Layout
 
@@ -26,7 +29,7 @@ same operations work from the **desktop app**, the **`mcpack` CLI**, scripts, or
 | --- | --- |
 | `crates/mcpack-core` | The launcher library. `tools.rs` is the single tool surface for all front ends |
 | `crates/mcpack-mcp` | The `mcpack` binary: CLI (`call`, `dev`, `tools`) and MCP server (`serve`) |
-| `agent-mod/` | Tiny Fabric mod injected into test launches: status, commands, screenshots, worlds, live reload |
+| `agent-mod/` | Tiny Java agent (`-javaagent`, not a mod) injected into launches: status, commands, screenshots, worlds, live reload — one jar for every loader and version |
 | `app/` | Desktop UI (Tauri 2 + React) linking mcpack-core in-process |
 | `examples/` | Example `pack.toml` |
 
@@ -102,8 +105,8 @@ hotswap = true                  # launch with a local JVM debug port; rebuilt mo
 | Resource packs, data packs (`overrides/`, content) | Reloaded live (`F3+T` / `/reload` via the agent) |
 | Configs | Restart, or a resource reload with `config_reload = "resources"` |
 | Rebuilt mod, code inside existing methods | Hot-swapped with `hotswap = true` (JDWP class redefinition) |
-| Rebuilt mod adding methods/fields/classes, mixins, `fabric.mod.json` | Restart (the JetBrains Runtime as `jvm.java` allows more to be hot-swapped) |
-| Mods added or removed, JVM/loader/Minecraft settings, `options.txt` | Restart: Fabric loads mods and applies mixins only at startup |
+| Rebuilt mod adding methods/fields/classes, mixins, mod metadata (`fabric.mod.json`, `mods.toml`…), access wideners/transformers | Restart (the JetBrains Runtime as `jvm.java` allows more to be hot-swapped) |
+| Mods added or removed, JVM/loader/Minecraft settings, `options.txt` | Restart: mod loaders load mods and apply mixins only at startup |
 
 Hot-swapped mod jars are written to the instance at the next launch (a running game keeps
 its mod jars open). Classes the game has not loaded yet and assets inside a swapped jar keep
@@ -118,8 +121,30 @@ Instances live in `<pack>/run/<profile>`.
 `config.toml`, `sessions/` (running games, visible across processes), `activity.jsonl`
 (journal of every tool call), `packs.json` (known packs).
 
-## Rebuilding the agent mod
+## Loaders
+
+| Loader | Install | Mods read by `check` |
+| --- | --- | --- |
+| Fabric / Quilt | launcher profiles from meta.fabricmc.net / meta.quiltmc.org | `fabric.mod.json`, `quilt.mod.json` |
+| Forge | official installer: legacy profiles (1.6 – 1.12.2) or installer processors (1.13+) | `META-INF/mods.toml`, `mcmod.info` |
+| NeoForge | official installer (1.20.1 builds come from `net.neoforged:forge`) | `META-INF/neoforge.mods.toml`, `META-INF/mods.toml` |
+
+`pack.loader.version = "latest"` picks the recommended Forge build (newest when none is
+recommended), the newest stable Fabric/Quilt/NeoForge build.
+
+## The in-game agent
+
+The agent is a plain Java agent (`agent-mod/`, Java 8 bytecode, no dependencies) added with
+`-javaagent`, so it is the same jar on every loader. It reaches the game through reflection
+using Mojang's names, translated to what the game runs with by a mappings file the launcher
+writes per version: Mojang's mappings (obfuscated vanilla), plus Fabric intermediary (Fabric,
+Quilt) or the SRG mappings from the Forge/NeoForge installer; none for unobfuscated versions
+(26.1+) and for Forge 1.20.6+ / NeoForge 1.20.5+. On 1.7.10 – 1.12.2 (vanilla and Forge) it uses
+MCP names (MCP's `joined.srg` and stable CSVs). Minecraft 1.13 – 1.14.3 has neither, so no agent there. It stays passive until the game has finished starting.
+
+New worlds are written by the launcher (a 1.12.2-format `level.dat` that every newer version
+upgrades) and then joined through the agent, so world creation works the same on all versions.
 
 ```sh
-cd agent-mod && ./gradlew dist    # writes dist/mcpack-agent-<mc>.jar, embedded at cargo build
+cd agent-mod && ./gradlew dist    # writes dist/mcpack-agent.jar, embedded at cargo build
 ```

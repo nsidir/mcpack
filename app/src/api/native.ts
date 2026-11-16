@@ -109,6 +109,7 @@ function toActivity(a: RawActivity): ActivityEvent {
 export const nativeBackend: Backend = {
   info: () => call("app_info"),
   listPacks: () => call<Pack[]>("pack_list"),
+  minecraftVersions: (snapshots) => call<string[]>("minecraft_versions", { snapshots: !!snapshots }),
   async createPack(input) {
     const info = await call<{ dir: string }>("pack_init", { ...input });
     const packs = await call<Pack[]>("pack_list");

@@ -2128,7 +2128,7 @@ dependencies = [
 
 [[package]]
 name = "mcpack-app"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "mcpack-core",
  "serde",
@@ -2142,9 +2142,10 @@ dependencies = [
 
 [[package]]
 name = "mcpack-core"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "dirs 5.0.1",
+ "flate2",
  "futures",
  "hex",
  "md-5",

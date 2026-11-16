@@ -146,18 +146,10 @@ impl Launcher {
             .or_else(|| manifest.minecraft.mod_loaders.first())
             .map(|l| l.id.clone())
             .unwrap_or_default();
-        let (loader, lv) = match loader_id.split_once('-') {
-            Some(("fabric", v)) => (LoaderKind::Fabric, v.to_string()),
-            Some(("quilt", v)) => (LoaderKind::Quilt, v.to_string()),
-            Some(("forge", _)) | Some(("neoforge", _)) => {
-                return Err(Error::Invalid("Forge/NeoForge packs are not supported yet".into()))
-            }
-            _ if loader_id.is_empty() => (LoaderKind::Vanilla, "latest".to_string()),
-            _ => {
-                warnings.push(format!("unknown loader '{loader_id}', using fabric latest"));
-                (LoaderKind::Fabric, "latest".to_string())
-            }
-        };
+        let (loader, lv) = parse_cf_loader(&loader_id, &manifest.minecraft.version).unwrap_or_else(|| {
+            warnings.push(format!("unknown loader '{loader_id}', using fabric latest"));
+            (LoaderKind::Fabric, "latest".to_string())
+        });
         let mut mods = Vec::new();
         for f in &manifest.files {
             if !f.required {
@@ -275,6 +267,12 @@ impl Launcher {
         let loader_id = match lock.loader {
             LoaderKind::Fabric => Some(format!("fabric-{}", lock.loader_version)),
             LoaderKind::Quilt => Some(format!("quilt-{}", lock.loader_version)),
+            LoaderKind::Forge => Some(format!(
+                "forge-{}",
+                lock.loader_version.strip_suffix(&format!("-{}", eff.minecraft)).unwrap_or(&lock.loader_version)
+            )),
+            LoaderKind::NeoForge if eff.minecraft == "1.20.1" => Some(format!("neoforge-1.20.1-{}", lock.loader_version)),
+            LoaderKind::NeoForge => Some(format!("neoforge-{}", lock.loader_version)),
             LoaderKind::Vanilla => None,
         };
         let manifest = CfManifest {
@@ -309,9 +307,37 @@ impl Launcher {
     }
 }
 
+/// A CurseForge `modLoaders[].id` ("fabric-0.16.14", "forge-47.3.0", "neoforge-21.1.77",
+/// "neoforge-1.20.1-47.1.106") → loader and version. `None` for unknown loaders.
+pub fn parse_cf_loader(loader_id: &str, mc: &str) -> Option<(LoaderKind, String)> {
+    if loader_id.is_empty() {
+        return Some((LoaderKind::Vanilla, "latest".to_string()));
+    }
+    let (name, v) = loader_id.split_once('-')?;
+    let v = v.strip_prefix(&format!("{mc}-")).unwrap_or(v).to_string();
+    let kind = match name {
+        "fabric" => LoaderKind::Fabric,
+        "quilt" => LoaderKind::Quilt,
+        "forge" => LoaderKind::Forge,
+        "neoforge" => LoaderKind::NeoForge,
+        _ => return None,
+    };
+    Some((kind, v))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn loaders() {
+        assert_eq!(parse_cf_loader("forge-47.3.0", "1.20.1"), Some((LoaderKind::Forge, "47.3.0".into())));
+        assert_eq!(parse_cf_loader("neoforge-1.20.1-47.1.106", "1.20.1"), Some((LoaderKind::NeoForge, "47.1.106".into())));
+        assert_eq!(parse_cf_loader("neoforge-21.1.77", "1.21.1"), Some((LoaderKind::NeoForge, "21.1.77".into())));
+        assert_eq!(parse_cf_loader("fabric-0.16.14", "1.21.1"), Some((LoaderKind::Fabric, "0.16.14".into())));
+        assert_eq!(parse_cf_loader("", "1.21.1"), Some((LoaderKind::Vanilla, "latest".into())));
+        assert_eq!(parse_cf_loader("liteloader-1.0", "1.12.2"), None);
+    }
 
     #[test]
     fn manifest_roundtrip() {

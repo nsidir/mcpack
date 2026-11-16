@@ -42,6 +42,8 @@ impl Http {
         let client = reqwest::Client::builder()
             .user_agent(USER_AGENT)
             .connect_timeout(Duration::from_secs(20))
+            // A stalled transfer fails (and is retried / taken from a mirror) instead of hanging.
+            .read_timeout(Duration::from_secs(60))
             .timeout(Duration::from_secs(300))
             .build()?;
         Ok(Self { client, concurrency, sem: Arc::new(Semaphore::new(concurrency.max(1))) })
@@ -139,6 +141,24 @@ impl Http {
             return Ok(0);
         }
         util::ensure_parent(&item.dest)?;
+        match self.download_retrying(item).await {
+            // Old loader metadata names repositories that moved or never had the file:
+            // try the same maven path on the other well-known repositories.
+            // (Also after timeouts and server errors: a struggling repository should not stall installs.)
+            Err(e) if !matches!(e, Error::HashMismatch { .. }) => {
+                for alt in maven_mirrors(&item.url) {
+                    let alt_item = DownloadItem { url: alt, ..item.clone() };
+                    if let Ok(n) = self.download_retrying(&alt_item).await {
+                        return Ok(n);
+                    }
+                }
+                Err(e)
+            }
+            r => r,
+        }
+    }
+
+    async fn download_retrying(&self, item: &DownloadItem) -> Result<u64> {
         let mut last_err = None;
         for attempt in 0..4u32 {
             if attempt > 0 {
@@ -234,6 +254,24 @@ impl Http {
             None => Ok(stats),
         }
     }
+}
+
+/// Maven repositories that mirror each other's artifacts for launcher libraries.
+const MAVEN_REPOS: &[&str] = &[
+    "https://libraries.minecraft.net/",
+    "https://maven.minecraftforge.net/",
+    "https://maven.neoforged.net/releases/",
+    "https://maven.fabricmc.net/",
+    // Mirror of the Forge maven; also has old Forge builds the main one stopped serving.
+    "https://maven.creeperhost.net/",
+    "https://repo1.maven.org/maven2/",
+];
+
+/// The same artifact path on the other known repositories (empty for non-maven URLs).
+pub fn maven_mirrors(url: &str) -> Vec<String> {
+    let known = MAVEN_REPOS.iter().find_map(|r| url.strip_prefix(r).map(|rest| (*r, rest)));
+    let Some((repo, rest)) = known else { return vec![] };
+    MAVEN_REPOS.iter().filter(|r| **r != repo).map(|r| format!("{r}{rest}")).collect()
 }
 
 /// Fast validity check: size match if known, else sha1 if known, else existence.

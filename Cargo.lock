@@ -266,6 +266,7 @@ checksum = "626d4928326b646e70f65ed36fc7cf9f206bdb68a0019ee7c6b4709da4e084c4"
 dependencies = [
  "crc32fast",
  "miniz_oxide",
+ "zlib-rs",
 ]
 
 [[package]]
@@ -814,9 +815,10 @@ dependencies = [
 
 [[package]]
 name = "mcpack-core"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "dirs",
+ "flate2",
  "futures",
  "hex",
  "md-5",
@@ -839,7 +841,7 @@ dependencies = [
 
 [[package]]
 name = "mcpack-mcp"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -2257,6 +2259,12 @@ dependencies = [
  "memchr",
  "zopfli",
 ]
+
+[[package]]
+name = "zlib-rs"
+version = "0.6.8"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b268e58e7c693d7c271f93ffc4ba3b380412554231c85bf61ca7af91042a4112"
 
 [[package]]
 name = "zmij"

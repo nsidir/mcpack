@@ -252,7 +252,7 @@ impl CurseForge {
 
     async fn candidate_files(&self, m: &CfMod, kind: ModKind, mc: &str, loader: LoaderKind) -> Result<Vec<CfFile>> {
         if kind == ModKind::Mod {
-            for t in loader.curseforge_types() {
+            for t in loader.curseforge_types_for(mc) {
                 let fs = self.files(m.id, Some(mc), Some(t)).await?;
                 if !fs.is_empty() {
                     return Ok(fs);
@@ -277,12 +277,31 @@ impl CurseForge {
         if let Some(mc) = &f.minecraft {
             q.push(("gameVersion", mc.clone()));
         }
-        if let (Some(l), ModKind::Mod) = (f.loader, kind) {
-            if let Some(t) = l.curseforge_types().first() {
-                q.push(("modLoaderType", t.to_string()));
+        // Loaders that also run another loader's mods (Quilt → Fabric, NeoForge 1.20.1 → Forge)
+        // search each type and merge, most downloaded first.
+        let types = match (f.loader, kind) {
+            (Some(l), ModKind::Mod) => l.curseforge_types_for(f.minecraft.as_deref().unwrap_or("")),
+            _ => vec![],
+        };
+        let mut mods: Vec<CfMod> = Vec::new();
+        if types.is_empty() {
+            mods = self.get("/mods/search", &q).await?;
+        } else {
+            for t in &types {
+                let mut qt = q.clone();
+                qt.push(("modLoaderType", t.to_string()));
+                let found: Vec<CfMod> = self.get("/mods/search", &qt).await?;
+                for m in found {
+                    if !mods.iter().any(|x| x.id == m.id) {
+                        mods.push(m);
+                    }
+                }
+            }
+            if types.len() > 1 {
+                mods.sort_by(|a, b| b.download_count.partial_cmp(&a.download_count).unwrap_or(std::cmp::Ordering::Equal));
+                mods.truncate(if f.limit == 0 { 10 } else { f.limit.min(50) as usize });
             }
         }
-        let mods: Vec<CfMod> = self.get("/mods/search", &q).await?;
         Ok(mods
             .into_iter()
             .map(|m| SearchHit {
@@ -302,7 +321,7 @@ impl CurseForge {
     pub async fn list_versions(&self, id: &str, mc: Option<&str>, loader: Option<LoaderKind>) -> Result<Vec<VersionSummary>> {
         let m = self.get_mod(id).await?;
         let kind = kind_from_class(m.class_id);
-        let lt = if kind == ModKind::Mod { loader.and_then(|l| l.curseforge_types().first().copied()) } else { None };
+        let lt = if kind == ModKind::Mod { loader.and_then(|l| l.curseforge_types_for(mc.unwrap_or("")).first().copied()) } else { None };
         let files = self.files(m.id, mc, lt).await?;
         Ok(files
             .into_iter()

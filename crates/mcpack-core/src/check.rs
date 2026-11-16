@@ -1,5 +1,6 @@
-//! Pre-launch checks: lock freshness, manual downloads, and jar-level metadata
-//! (fabric.mod.json / quilt.mod.json) dependency validation.
+//! Pre-launch checks: lock freshness, manual downloads, and jar-level metadata dependency
+//! validation: fabric.mod.json / quilt.mod.json (Fabric, Quilt), META-INF/mods.toml (Forge,
+//! NeoForge 1.20.1 – 1.20.4), META-INF/neoforge.mods.toml (NeoForge 1.20.5+), mcmod.info (old Forge).
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::{Cursor, Read};
@@ -9,6 +10,7 @@ use serde::Serialize;
 
 use crate::diagnose::Problem;
 use crate::error::{IoContext, Result};
+use crate::meta::loader::LoaderKind;
 
 #[derive(Debug, Clone, Serialize, Default)]
 pub struct ModMeta {
@@ -21,6 +23,12 @@ pub struct ModMeta {
     pub breaks: BTreeMap<String, Vec<String>>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub nested: Vec<ModMeta>,
+    /// Which metadata it was read from: fabric | quilt | forge | neoforge | legacyforge.
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub platform: String,
+    /// Mod platforms the jar has metadata for (multi-loader jars list several).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub platforms: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Default)]
@@ -39,7 +47,10 @@ pub struct ModSummary {
 }
 
 /// Ids provided by the platform rather than by mods.
-const BUILTIN: &[&str] = &["minecraft", "java", "fabricloader", "fabric-loader", "quilt_loader", "quilt_base"];
+const BUILTIN: &[&str] = &[
+    "minecraft", "java", "fabricloader", "fabric-loader", "quilt_loader", "quilt_base", "forge", "neoforge", "fml", "javafml",
+    "lowcodefml", "mcp", "Forge", "FML",
+];
 
 fn values(v: &serde_json::Value) -> Vec<String> {
     match v {
@@ -56,6 +67,7 @@ fn parse_fabric(json: &serde_json::Value, file: &str) -> Option<ModMeta> {
         version: json.get("version").and_then(|v| v.as_str()).unwrap_or("").to_string(),
         name: json.get("name").and_then(|v| v.as_str()).map(str::to_string),
         file: file.to_string(),
+        platform: "fabric".into(),
         ..Default::default()
     };
     if let Some(p) = json.get("provides").and_then(|p| p.as_array()) {
@@ -78,6 +90,7 @@ fn parse_quilt(json: &serde_json::Value, file: &str) -> Option<ModMeta> {
         version: ql.get("version").and_then(|v| v.as_str()).unwrap_or("").to_string(),
         name: ql.get("metadata").and_then(|md| md.get("name")).and_then(|v| v.as_str()).map(str::to_string),
         file: file.to_string(),
+        platform: "quilt".into(),
         ..Default::default()
     };
     if let Some(p) = ql.get("provides").and_then(|p| p.as_array()) {
@@ -104,33 +117,204 @@ fn parse_quilt(json: &serde_json::Value, file: &str) -> Option<ModMeta> {
     Some(m)
 }
 
-/// Read mod metadata (with nested jar-in-jar mods) from jar bytes.
-pub fn read_jar_bytes(bytes: &[u8], file: &str, depth: u32) -> Result<Option<ModMeta>> {
+/// Maven version range (Forge `versionRange`) → predicates [`version_matches`] understands.
+/// `[1.2,2)` → `>=1.2 <2`; `[1.0]` → `=1.0`; ranges joined by commas are OR-ed; a bare
+/// version is a soft requirement (anything).
+pub fn maven_range(range: &str) -> Vec<String> {
+    let r = range.trim();
+    if r.is_empty() || r == "*" || !(r.starts_with('[') || r.starts_with('(')) {
+        return vec!["*".into()];
+    }
+    let mut out = Vec::new();
+    let mut rest = r;
+    while let Some(start) = rest.find(['[', '(']) {
+        let Some(end_rel) = rest[start..].find([']', ')']) else { break };
+        let end = start + end_rel;
+        let (open, close) = (&rest[start..=start], &rest[end..=end]);
+        let inner = &rest[start + 1..end];
+        let pred = match inner.split_once(',') {
+            None => format!("={}", inner.trim()),
+            Some((lo, hi)) => {
+                let mut parts = Vec::new();
+                if !lo.trim().is_empty() {
+                    parts.push(format!("{}{}", if open == "[" { ">=" } else { ">" }, lo.trim()));
+                }
+                if !hi.trim().is_empty() {
+                    parts.push(format!("{}{}", if close == "]" { "<=" } else { "<" }, hi.trim()));
+                }
+                if parts.is_empty() {
+                    "*".to_string()
+                } else {
+                    parts.join(" ")
+                }
+            }
+        };
+        out.push(pred);
+        rest = &rest[end + 1..];
+    }
+    if out.is_empty() {
+        vec!["*".into()]
+    } else {
+        out
+    }
+}
+
+fn read_text(zip: &mut zip::ZipArchive<Cursor<&[u8]>>, name: &str) -> Option<String> {
+    let mut f = zip.by_name(name).ok()?;
+    let mut s = String::new();
+    f.read_to_string(&mut s).ok()?;
+    Some(s)
+}
+
+fn manifest_version(zip: &mut zip::ZipArchive<Cursor<&[u8]>>) -> Option<String> {
+    read_text(zip, "META-INF/MANIFEST.MF")?
+        .lines()
+        .find_map(|l| l.strip_prefix("Implementation-Version:").map(|v| v.trim().to_string()))
+}
+
+/// Forge / NeoForge `mods.toml`: every `[[mods]]` entry (the first is the jar's primary mod).
+fn parse_mods_toml(text: &str, file: &str, platform: &str, jar_version: Option<&str>) -> Vec<ModMeta> {
+    let Ok(doc) = text.parse::<toml::Table>() else { return vec![] };
+    let deps = doc.get("dependencies").and_then(|d| d.as_table());
+    let mut out = Vec::new();
+    for m in doc.get("mods").and_then(|m| m.as_array()).into_iter().flatten() {
+        let Some(id) = m.get("modId").and_then(|v| v.as_str()) else { continue };
+        let mut version = m.get("version").and_then(|v| v.as_str()).unwrap_or("").to_string();
+        if version.contains("${file.jarVersion}") {
+            version = jar_version.unwrap_or("").to_string();
+        }
+        let mut meta = ModMeta {
+            id: id.to_string(),
+            version,
+            name: m.get("displayName").and_then(|v| v.as_str()).map(str::to_string),
+            file: file.to_string(),
+            platform: platform.to_string(),
+            ..Default::default()
+        };
+        for d in deps.and_then(|t| t.get(id)).and_then(|v| v.as_array()).into_iter().flatten() {
+            let Some(dep) = d.get("modId").and_then(|v| v.as_str()) else { continue };
+            if d.get("side").and_then(|v| v.as_str()).is_some_and(|s| s.eq_ignore_ascii_case("server")) {
+                continue;
+            }
+            let range = maven_range(d.get("versionRange").and_then(|v| v.as_str()).unwrap_or("*"));
+            // Forge: mandatory = true|false; NeoForge: type = required|optional|incompatible|discouraged.
+            let kind = d.get("type").and_then(|v| v.as_str()).map(str::to_ascii_lowercase);
+            let mandatory = d.get("mandatory").and_then(|v| v.as_bool());
+            match (kind.as_deref(), mandatory) {
+                (Some("required"), _) | (None, Some(true)) => {
+                    meta.depends.insert(dep.to_string(), range);
+                }
+                (Some("incompatible"), _) => {
+                    meta.breaks.insert(dep.to_string(), range);
+                }
+                _ => {}
+            }
+        }
+        out.push(meta);
+    }
+    out
+}
+
+/// Old Forge `mcmod.info` (a JSON list, or `{"modList": [...]}`).
+fn parse_mcmod_info(text: &str, file: &str) -> Vec<ModMeta> {
+    let cleaned = text.replace(['\n', '\r', '\t'], " ");
+    let Ok(json) = serde_json::from_str::<serde_json::Value>(&cleaned) else { return vec![] };
+    let list = json
+        .as_array()
+        .cloned()
+        .or_else(|| json.get("modList").and_then(|l| l.as_array()).cloned())
+        .unwrap_or_default();
+    list.iter()
+        .filter_map(|m| {
+            let id = m.get("modid").and_then(|v| v.as_str())?;
+            let mut meta = ModMeta {
+                id: id.to_string(),
+                version: m.get("version").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+                name: m.get("name").and_then(|v| v.as_str()).map(str::to_string),
+                file: file.to_string(),
+                platform: "legacyforge".into(),
+                ..Default::default()
+            };
+            for d in m.get("requiredMods").and_then(|v| v.as_array()).into_iter().flatten().filter_map(|v| v.as_str()) {
+                let (dep, range) = d.split_once('@').unwrap_or((d, "*"));
+                meta.depends.insert(dep.to_string(), maven_range(range));
+            }
+            Some(meta)
+        })
+        .collect()
+}
+
+/// Metadata platforms in the order to prefer for a pack's loader (multi-loader jars carry several).
+fn platform_order(loader: LoaderKind) -> &'static [&'static str] {
+    match loader {
+        LoaderKind::Quilt => &["quilt", "fabric", "neoforge", "forge", "legacyforge"],
+        LoaderKind::Forge => &["forge", "legacyforge", "neoforge", "fabric", "quilt"],
+        LoaderKind::NeoForge => &["neoforge", "forge", "fabric", "quilt", "legacyforge"],
+        _ => &["fabric", "quilt", "neoforge", "forge", "legacyforge"],
+    }
+}
+
+/// Read mod metadata (with nested jar-in-jar mods) from jar bytes, preferring the metadata
+/// of `loader` when a jar supports several loaders.
+pub fn read_jar_bytes(bytes: &[u8], file: &str, depth: u32, loader: LoaderKind) -> Result<Option<ModMeta>> {
     let mut zip = match zip::ZipArchive::new(Cursor::new(bytes)) {
         Ok(z) => z,
         Err(_) => return Ok(None),
     };
-    let mut meta: Option<ModMeta> = None;
-    for name in ["fabric.mod.json", "quilt.mod.json"] {
-        if meta.is_some() {
-            break;
-        }
-        if let Ok(mut f) = zip.by_name(name) {
-            let mut s = String::new();
-            if f.read_to_string(&mut s).is_ok() {
+    let jar_version = manifest_version(&mut zip);
+    let mut found: Vec<Vec<ModMeta>> = Vec::new();
+    for (name, platform) in [
+        ("fabric.mod.json", "fabric"),
+        ("quilt.mod.json", "quilt"),
+        ("META-INF/neoforge.mods.toml", "neoforge"),
+        ("META-INF/mods.toml", "forge"),
+        ("mcmod.info", "legacyforge"),
+    ] {
+        let Some(text) = read_text(&mut zip, name) else { continue };
+        let metas: Vec<ModMeta> = match platform {
+            "fabric" | "quilt" => {
                 // Some mods have raw newlines inside strings; be lenient.
-                let cleaned = s.replace(['\n', '\r', '\t'], " ");
-                if let Ok(json) = serde_json::from_str::<serde_json::Value>(&cleaned) {
-                    meta = if name == "fabric.mod.json" { parse_fabric(&json, file) } else { parse_quilt(&json, file) };
-                }
+                let cleaned = text.replace(['\n', '\r', '\t'], " ");
+                serde_json::from_str::<serde_json::Value>(&cleaned)
+                    .ok()
+                    .and_then(|json| if platform == "fabric" { parse_fabric(&json, file) } else { parse_quilt(&json, file) })
+                    .into_iter()
+                    .collect()
             }
+            "legacyforge" => parse_mcmod_info(&text, file),
+            _ => {
+                let mut v = parse_mods_toml(&text, file, platform, jar_version.as_deref());
+                // NeoForge 1.20.2 – 1.20.4 mods still use META-INF/mods.toml.
+                if platform == "forge" && v.iter().any(|m| m.depends.contains_key("neoforge")) {
+                    for m in &mut v {
+                        m.platform = "neoforge".into();
+                    }
+                }
+                v
+            }
+        };
+        if !metas.is_empty() {
+            found.push(metas);
         }
     }
-    let Some(mut meta) = meta else { return Ok(None) };
+    let mut platforms: Vec<String> = Vec::new();
+    for f in &found {
+        if !platforms.contains(&f[0].platform) {
+            platforms.push(f[0].platform.clone());
+        }
+    }
+    let order = platform_order(loader);
+    found.sort_by_key(|f| order.iter().position(|o| *o == f[0].platform).unwrap_or(order.len()));
+    let Some(mut metas) = found.into_iter().next() else { return Ok(None) };
+    let mut meta = metas.remove(0);
+    meta.platforms = platforms;
+    // Further mods declared by the same jar.
+    meta.nested.extend(metas);
     if depth < 3 {
+        // Fabric/Quilt jar-in-jar (META-INF/jars) and Forge/NeoForge JarJar (META-INF/jarjar).
         let nested_names: Vec<String> = zip
             .file_names()
-            .filter(|n| n.starts_with("META-INF/jars/") && n.ends_with(".jar"))
+            .filter(|n| (n.starts_with("META-INF/jars/") || n.starts_with("META-INF/jarjar/")) && n.ends_with(".jar"))
             .map(str::to_string)
             .collect();
         for n in nested_names {
@@ -140,7 +324,9 @@ pub fn read_jar_bytes(bytes: &[u8], file: &str, depth: u32) -> Result<Option<Mod
                     continue;
                 }
             }
-            if let Ok(Some(m)) = read_jar_bytes(&buf, &format!("{file}!/{n}"), depth + 1) {
+            if let Ok(Some(mut m)) = read_jar_bytes(&buf, &format!("{file}!/{n}"), depth + 1, loader) {
+                // Nested jars are libraries of the outer mod: their loader is the outer one's.
+                m.platforms.clear();
                 meta.nested.push(m);
             }
         }
@@ -148,7 +334,7 @@ pub fn read_jar_bytes(bytes: &[u8], file: &str, depth: u32) -> Result<Option<Mod
     Ok(Some(meta))
 }
 
-pub fn scan_mods_dir(dir: &Path) -> Result<(Vec<ModMeta>, Vec<String>)> {
+pub fn scan_mods_dir(dir: &Path, loader: LoaderKind) -> Result<(Vec<ModMeta>, Vec<String>)> {
     let mut mods = Vec::new();
     let mut non_mods = Vec::new();
     let Ok(rd) = std::fs::read_dir(dir) else { return Ok((mods, non_mods)) };
@@ -157,12 +343,25 @@ pub fn scan_mods_dir(dir: &Path) -> Result<(Vec<ModMeta>, Vec<String>)> {
     for p in paths {
         let bytes = std::fs::read(&p).ctx(&p)?;
         let file = p.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
-        match read_jar_bytes(&bytes, &file, 0)? {
+        match read_jar_bytes(&bytes, &file, 0, loader)? {
             Some(m) => mods.push(m),
             None => non_mods.push(file),
         }
     }
     Ok((mods, non_mods))
+}
+
+/// Does a mod with metadata for `platforms` load on `loader` (Minecraft `mc`)?
+pub fn platform_supported(platforms: &[String], loader: LoaderKind, mc: &str) -> bool {
+    let has = |p: &str| platforms.iter().any(|x| x == p);
+    match loader {
+        LoaderKind::Fabric => has("fabric"),
+        LoaderKind::Quilt => has("quilt") || has("fabric"),
+        LoaderKind::Forge => has("forge") || has("legacyforge"),
+        // NeoForge for 1.20.1 is a Forge fork that still loads Forge mods.
+        LoaderKind::NeoForge => has("neoforge") || (mc == "1.20.1" && has("forge")),
+        LoaderKind::Vanilla => false,
+    }
 }
 
 /// Every version of each mod id present (top-level jars and jar-in-jar copies). Fabric picks
@@ -178,7 +377,7 @@ fn collect_ids(m: &ModMeta, out: &mut BTreeMap<String, Vec<String>>) {
 }
 
 /// Validate jar-level dependencies against Minecraft version and Java major.
-pub fn check_mods(mods: &[ModMeta], minecraft: &str, java_major: Option<u32>, loader_version: &str) -> Vec<Problem> {
+pub fn check_mods(mods: &[ModMeta], minecraft: &str, java_major: Option<u32>, loader: LoaderKind, loader_version: &str) -> Vec<Problem> {
     let mut problems = Vec::new();
     let mut ids: BTreeMap<String, Vec<String>> = BTreeMap::new();
     for m in mods {
@@ -189,8 +388,41 @@ pub fn check_mods(mods: &[ModMeta], minecraft: &str, java_major: Option<u32>, lo
         ids.insert("java".into(), vec![j.to_string()]);
     }
     if !loader_version.is_empty() {
-        ids.insert("fabricloader".into(), vec![loader_version.into()]);
-        ids.insert("fabric-loader".into(), vec![loader_version.into()]);
+        // Old Forge builds carry the Minecraft version as a suffix ("10.13.4.1614-1.7.10").
+        let lv = loader_version.strip_suffix(&format!("-{minecraft}")).unwrap_or(loader_version).to_string();
+        for id in loader.builtin_mod_ids() {
+            ids.insert((*id).to_string(), vec![lv.clone()]);
+        }
+        if loader == LoaderKind::NeoForge && minecraft == "1.20.1" {
+            ids.insert("forge".into(), vec![lv.clone()]);
+        }
+        if loader.is_forge_like() {
+            // Language providers are versioned with the loader's major version.
+            let major = lv.split('.').next().unwrap_or("").to_string();
+            ids.insert("javafml".into(), vec![major.clone()]);
+            ids.insert("lowcodefml".into(), vec![major]);
+        }
+    }
+
+    // Jars built for another loader do not load at all.
+    for m in mods {
+        if !m.platforms.is_empty() && loader != LoaderKind::Vanilla && !platform_supported(&m.platforms, loader, minecraft) {
+            problems.push(
+                Problem::error(
+                    "wrong_loader",
+                    format!(
+                        "{} ({}) is a {} mod; this pack uses {}",
+                        m.name.as_deref().unwrap_or(&m.id),
+                        m.file,
+                        m.platforms.join("/"),
+                        loader.display()
+                    ),
+                )
+                .mods(vec![m.id.clone()])
+                .files(vec![m.file.clone()])
+                .suggest(format!("replace it with the {} version of the mod (pack_add finds it by slug)", loader.display())),
+            );
+        }
     }
 
     // Duplicates among top-level jars.
@@ -468,7 +700,7 @@ mod tests {
             depends: BTreeMap::from([("fabric-api".to_string(), s(&["*"])), ("minecraft".to_string(), s(&["~1.21"]))]),
             ..Default::default()
         };
-        let p = check_mods(&[a.clone()], "1.21.1", Some(21), "0.16.14");
+        let p = check_mods(&[a.clone()], "1.21.1", Some(21), LoaderKind::Fabric, "0.16.14");
         assert_eq!(p.len(), 1);
         assert_eq!(p[0].kind, "missing_dependency");
         let api = ModMeta {
@@ -477,8 +709,8 @@ mod tests {
             nested: vec![ModMeta { id: "fabric-api-base".into(), version: "0.4".into(), ..Default::default() }],
             ..Default::default()
         };
-        assert!(check_mods(&[a.clone(), api.clone()], "1.21.1", Some(21), "").is_empty());
-        let p = check_mods(&[a, api], "1.20.1", Some(17), "");
+        assert!(check_mods(&[a.clone(), api.clone()], "1.21.1", Some(21), LoaderKind::Fabric, "").is_empty());
+        let p = check_mods(&[a, api], "1.20.1", Some(17), LoaderKind::Fabric, "");
         assert!(p.iter().any(|x| x.kind == "wrong_dependency_version"));
     }
 
@@ -492,8 +724,113 @@ mod tests {
             ..Default::default()
         };
         let cloth = ModMeta { id: "cloth-config".into(), version: "11.1.136".into(), ..Default::default() };
-        assert!(check_mods(&[user.clone(), cloth], "1.20.1", Some(17), "").is_empty());
-        let p = check_mods(&[user], "1.20.1", Some(17), "");
+        assert!(check_mods(&[user.clone(), cloth], "1.20.1", Some(17), LoaderKind::Fabric, "").is_empty());
+        let p = check_mods(&[user], "1.20.1", Some(17), LoaderKind::Fabric, "");
         assert!(p[0].message.contains("11.0.99"));
+    }
+
+    fn jar(files: &[(&str, &str)]) -> Vec<u8> {
+        let mut buf = Cursor::new(Vec::new());
+        {
+            let mut z = zip::ZipWriter::new(&mut buf);
+            for (name, text) in files {
+                z.start_file(*name, zip::write::SimpleFileOptions::default()).unwrap();
+                std::io::Write::write_all(&mut z, text.as_bytes()).unwrap();
+            }
+            z.finish().unwrap();
+        }
+        buf.into_inner()
+    }
+
+    #[test]
+    fn maven_ranges() {
+        assert_eq!(maven_range("[47,)"), s(&[">=47"]));
+        assert_eq!(maven_range("[1.20.1,1.21)"), s(&[">=1.20.1 <1.21"]));
+        assert_eq!(maven_range("(,2.0]"), s(&["<=2.0"]));
+        assert_eq!(maven_range("[1.0]"), s(&["=1.0"]));
+        assert_eq!(maven_range("[1,2),[3,4)"), s(&[">=1 <2", ">=3 <4"]));
+        assert_eq!(maven_range("1.0"), s(&["*"]));
+        assert_eq!(version_matches("47.4.28", &maven_range("[47,)")), Some(true));
+        assert_eq!(version_matches("1.20.1", &maven_range("[1.20,1.21)")), Some(true));
+        assert_eq!(version_matches("1.21.1", &maven_range("[1.20,1.21)")), Some(false));
+    }
+
+    #[test]
+    fn forge_mods_toml() {
+        let toml = r#"
+modLoader="javafml"
+loaderVersion="[47,)"
+[[mods]]
+modId="jei"
+version="${file.jarVersion}"
+displayName="Just Enough Items"
+[[dependencies.jei]]
+modId="forge"
+mandatory=true
+versionRange="[47.1,)"
+side="BOTH"
+[[dependencies.jei]]
+modId="minecraft"
+mandatory=true
+versionRange="[1.20.1,1.20.2)"
+[[dependencies.jei]]
+modId="optionalthing"
+mandatory=false
+[[dependencies.jei]]
+modId="serveronly"
+mandatory=true
+side="SERVER"
+"#;
+        let bytes = jar(&[("META-INF/mods.toml", toml), ("META-INF/MANIFEST.MF", "Manifest-Version: 1.0
+Implementation-Version: 15.2.0.27
+")]);
+        let m = read_jar_bytes(&bytes, "jei.jar", 0, LoaderKind::Forge).unwrap().unwrap();
+        assert_eq!(m.id, "jei");
+        assert_eq!(m.version, "15.2.0.27");
+        assert_eq!(m.platform, "forge");
+        assert_eq!(m.depends.keys().cloned().collect::<Vec<_>>(), vec!["forge", "minecraft"]);
+        assert!(check_mods(&[m.clone()], "1.20.1", Some(17), LoaderKind::Forge, "47.4.28").is_empty());
+        let p = check_mods(&[m.clone()], "1.20.1", Some(17), LoaderKind::Forge, "47.0.1");
+        assert_eq!(p[0].kind, "wrong_dependency_version");
+        // A Forge mod in a Fabric pack does not load.
+        let p = check_mods(&[m.clone()], "1.20.1", Some(17), LoaderKind::Fabric, "0.16.14");
+        assert!(p.iter().any(|x| x.kind == "wrong_loader"));
+        // NeoForge for 1.20.1 loads Forge mods; later NeoForge does not.
+        assert!(check_mods(&[m.clone()], "1.20.1", Some(17), LoaderKind::NeoForge, "47.1.106").is_empty());
+        assert!(check_mods(&[m], "1.21.1", Some(21), LoaderKind::NeoForge, "21.1.77").iter().any(|x| x.kind == "wrong_loader"));
+    }
+
+    #[test]
+    fn neoforge_and_multiloader_jars() {
+        let neo = r#"
+[[mods]]
+modId="sodium"
+version="0.6.0"
+[[dependencies.sodium]]
+modId="neoforge"
+type="required"
+versionRange="[21.1,)"
+[[dependencies.sodium]]
+modId="embeddium"
+type="incompatible"
+"#;
+        let fabric = r#"{"schemaVersion":1,"id":"sodium","version":"0.6.0+fabric","depends":{"fabricloader":">=0.16"}}"#;
+        let bytes = jar(&[("META-INF/neoforge.mods.toml", neo), ("fabric.mod.json", fabric)]);
+        let on_neo = read_jar_bytes(&bytes, "sodium.jar", 0, LoaderKind::NeoForge).unwrap().unwrap();
+        assert_eq!(on_neo.platform, "neoforge");
+        assert!(on_neo.breaks.contains_key("embeddium"));
+        assert!(check_mods(&[on_neo], "1.21.1", Some(21), LoaderKind::NeoForge, "21.1.77").is_empty());
+        let on_fabric = read_jar_bytes(&bytes, "sodium.jar", 0, LoaderKind::Fabric).unwrap().unwrap();
+        assert_eq!(on_fabric.platform, "fabric");
+        assert!(check_mods(&[on_fabric], "1.21.1", Some(21), LoaderKind::Fabric, "0.16.14").is_empty());
+    }
+
+    #[test]
+    fn legacy_mcmod_info() {
+        let info = r#"[{"modid":"journeymap","name":"JourneyMap","version":"5.7.1","requiredMods":["Forge@[14.23,)"]}]"#;
+        let bytes = jar(&[("mcmod.info", info)]);
+        let m = read_jar_bytes(&bytes, "jm.jar", 0, LoaderKind::Forge).unwrap().unwrap();
+        assert_eq!((m.id.as_str(), m.platform.as_str()), ("journeymap", "legacyforge"));
+        assert!(check_mods(&[m], "1.12.2", Some(8), LoaderKind::Forge, "14.23.5.2864").is_empty());
     }
 }

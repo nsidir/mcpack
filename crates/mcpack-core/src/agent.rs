@@ -1,4 +1,7 @@
-//! In-game automation agent: bundled jars + JSON-RPC client.
+//! In-game automation agent: the bundled Java agent jar + JSON-RPC client.
+//!
+//! The agent is a `-javaagent`, not a mod, so the same jar works with every loader (and
+//! vanilla). It reaches the game through reflection; [`mappings`] tells it the runtime names.
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -11,33 +14,45 @@ use tokio::net::TcpStream;
 use crate::error::{Error, Result};
 use crate::util;
 
-include!(concat!(env!("OUT_DIR"), "/agent_jars.rs"));
+pub mod mappings;
 
-pub const AGENT_FILENAME: &str = "mcpack-agent.jar";
+include!(concat!(env!("OUT_DIR"), "/agent_jar.rs"));
 
-/// Minecraft versions with a bundled agent.
-pub fn supported_versions() -> Vec<&'static str> {
-    AGENT_JARS.iter().map(|(v, _)| *v).collect()
-}
+pub use mappings::AgentSupport;
 
-/// Agent jar for a Minecraft version, materialized under `agent_dir`. Override with
-/// `$MCPACK_AGENT_DIR/mcpack-agent-<mc>.jar` for agent development.
-pub fn jar_for(agent_dir: &Path, mc: &str) -> Result<Option<PathBuf>> {
+/// Where the agent works (for docs and `app_info`).
+pub const SUPPORT_SUMMARY: &str =
+    "Minecraft 1.14.4 and newer on vanilla, Fabric, Quilt, Forge and NeoForge; vanilla and Forge 1.7.10 – 1.12.2";
+
+/// Where the agent jar lives: materialized under `agent_dir`, or
+/// `$MCPACK_AGENT_DIR/mcpack-agent.jar` for agent development.
+pub fn jar(agent_dir: &Path) -> Result<Option<PathBuf>> {
     if let Some(dir) = std::env::var_os("MCPACK_AGENT_DIR") {
-        let p = PathBuf::from(dir).join(format!("mcpack-agent-{mc}.jar"));
+        let p = PathBuf::from(dir).join("mcpack-agent.jar");
         if p.exists() {
             return Ok(Some(p));
         }
     }
-    let Some((_, bytes)) = AGENT_JARS.iter().find(|(v, _)| *v == mc) else {
-        return Ok(None);
-    };
+    let Some(bytes) = AGENT_JAR else { return Ok(None) };
     let sha = util::sha1_bytes(bytes);
-    let p = agent_dir.join(format!("mcpack-agent-{mc}-{}.jar", &sha[..8]));
+    let p = agent_dir.join(format!("mcpack-agent-{}.jar", &sha[..8]));
     if !p.exists() {
         util::write_atomic(&p, bytes)?;
     }
     Ok(Some(p))
+}
+
+/// JVM arguments that load the agent into a game.
+pub fn jvm_args(jar: &Path, support: &AgentSupport, mc: &str, loader: crate::LoaderKind) -> Vec<String> {
+    let mut v = vec![
+        format!("-javaagent:{}", jar.display()),
+        format!("-Dmcpack.agent.mc={mc}"),
+        format!("-Dmcpack.agent.loader={}", loader.as_str()),
+    ];
+    if let AgentSupport::Mapped(p) = support {
+        v.push(format!("-Dmcpack.agent.mappings={}", p.display()));
+    }
+    v
 }
 
 /// Where a running game's agent listens.

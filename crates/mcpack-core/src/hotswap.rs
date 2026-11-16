@@ -10,8 +10,9 @@
 //!   methods or fields, changing signatures, modifiers or the class hierarchy). The JetBrains
 //!   Runtime accepts most of these; `-XX:+AllowEnhancedClassRedefinition` is added
 //!   automatically when the game runs on it;
-//! - new classes, mixin classes, and what Fabric reads only at startup (fabric.mod.json, mixin
-//!   configs and refmaps, access wideners, nested jars);
+//! - new classes, mixin classes, and what the mod loader reads only at startup: metadata
+//!   (fabric.mod.json, quilt.mod.json, mods.toml, neoforge.mods.toml, mcmod.info), mixin
+//!   configs and refmaps, access wideners / access transformers, coremods, nested jars;
 //! - mods added or removed.
 //!
 //! What waits for the next launch (reported, not an error): changed classes the game has not
@@ -89,7 +90,7 @@ pub struct JarDiff {
     pub changed_classes: Vec<String>,
     pub added_classes: Vec<String>,
     pub removed_classes: Vec<String>,
-    /// Changes Fabric only reads at startup (metadata, mixins, access wideners, nested jars).
+    /// Changes the loader only reads at startup (metadata, mixins, access wideners/transformers, nested jars).
     pub startup_changes: Vec<String>,
     /// Non-class files that changed: they keep their old version until the next launch.
     pub resources_changed: Vec<String>,
@@ -99,7 +100,7 @@ impl JarDiff {
     /// Why this diff cannot be applied to a running game, if it cannot.
     pub fn blocker(&self) -> Option<String> {
         if !self.startup_changes.is_empty() {
-            return Some(format!("{} changed, which Fabric only reads at startup", short_list(&self.startup_changes)));
+            return Some(format!("{} changed, which the mod loader only reads at startup", short_list(&self.startup_changes)));
         }
         if !self.added_classes.is_empty() {
             return Some(format!("new classes ({}) cannot be loaded into the running game", short_list(&self.added_classes)));
@@ -179,17 +180,47 @@ fn json_of(entries: &BTreeMap<String, Vec<u8>>, name: &str) -> Option<serde_json
     entries.get(name).and_then(|b| serde_json::from_slice(b).ok())
 }
 
-/// Mixin config file names declared in fabric.mod.json.
+fn text_of(entries: &BTreeMap<String, Vec<u8>>, name: &str) -> Option<String> {
+    entries.get(name).map(|b| String::from_utf8_lossy(b).into_owned())
+}
+
+/// Mixin config file names: fabric.mod.json `mixins`, quilt.mod.json `mixin`,
+/// [[mixins]] in (neoforge.)mods.toml, and the `MixinConfigs` manifest attribute (Forge).
 fn mixin_configs(entries: &BTreeMap<String, Vec<u8>>) -> Vec<String> {
-    let Some(meta) = json_of(entries, "fabric.mod.json") else { return vec![] };
-    meta.get("mixins")
-        .and_then(|m| m.as_array())
-        .map(|a| {
-            a.iter()
+    let mut out: Vec<String> = Vec::new();
+    let from_json = |v: Option<&serde_json::Value>| -> Vec<String> {
+        match v {
+            Some(serde_json::Value::String(s)) => vec![s.clone()],
+            Some(serde_json::Value::Array(a)) => a
+                .iter()
                 .filter_map(|m| m.as_str().map(str::to_string).or_else(|| m.get("config").and_then(|c| c.as_str()).map(str::to_string)))
-                .collect()
-        })
-        .unwrap_or_default()
+                .collect(),
+            _ => vec![],
+        }
+    };
+    if let Some(meta) = json_of(entries, "fabric.mod.json") {
+        out.extend(from_json(meta.get("mixins")));
+    }
+    if let Some(meta) = json_of(entries, "quilt.mod.json") {
+        out.extend(from_json(meta.get("mixin")));
+    }
+    for toml_name in ["META-INF/mods.toml", "META-INF/neoforge.mods.toml"] {
+        if let Some(doc) = text_of(entries, toml_name).and_then(|t| t.parse::<toml::Table>().ok()) {
+            for m in doc.get("mixins").and_then(|m| m.as_array()).into_iter().flatten() {
+                if let Some(c) = m.get("config").and_then(|c| c.as_str()) {
+                    out.push(c.to_string());
+                }
+            }
+        }
+    }
+    if let Some(manifest) = text_of(entries, "META-INF/MANIFEST.MF") {
+        if let Some(v) = manifest.lines().find_map(|l| l.strip_prefix("MixinConfigs:")) {
+            out.extend(v.split(',').map(|c| c.trim().to_string()).filter(|c| !c.is_empty()));
+        }
+    }
+    out.sort();
+    out.dedup();
+    out
 }
 
 fn mixin_packages(entries: &BTreeMap<String, Vec<u8>>) -> Vec<String> {
@@ -200,9 +231,27 @@ fn mixin_packages(entries: &BTreeMap<String, Vec<u8>>) -> Vec<String> {
         .collect()
 }
 
-/// Files Fabric (or Quilt) reads only while starting the game.
+/// Files the mod loader reads only while starting the game.
 fn startup_files(entries: &BTreeMap<String, Vec<u8>>) -> Vec<String> {
-    let mut out = vec!["fabric.mod.json".to_string(), "quilt.mod.json".to_string()];
+    let mut out: Vec<String> = [
+        "fabric.mod.json",
+        "quilt.mod.json",
+        "META-INF/mods.toml",
+        "META-INF/neoforge.mods.toml",
+        "mcmod.info",
+        "META-INF/accesstransformer.cfg",
+        "META-INF/coremods.json",
+        "META-INF/jarjar/metadata.json",
+    ]
+    .iter()
+    .map(|s| s.to_string())
+    .collect();
+    // Access transformers / coremods declared elsewhere (NeoForge [[accessTransformers]]).
+    for name in entries.keys() {
+        if name.ends_with(".cfg") && name.starts_with("META-INF/") || name.starts_with("META-INF/coremods") {
+            out.push(name.clone());
+        }
+    }
     let configs = mixin_configs(entries);
     for c in &configs {
         if let Some(r) = json_of(entries, c).and_then(|cfg| cfg.get("refmap").and_then(|r| r.as_str()).map(str::to_string)) {
@@ -462,7 +511,7 @@ mod tests {
         assert!(d.startup_changes.is_empty() && d.added_classes.is_empty(), "{d:?}");
         assert!(d.blocker().is_none());
 
-        // Mixin classes, new classes and Fabric metadata block a hot-swap.
+        // Mixin classes, new classes and loader metadata block a hot-swap.
         jar(
             &new,
             &[

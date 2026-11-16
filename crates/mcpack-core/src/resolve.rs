@@ -132,7 +132,7 @@ pub async fn resolve(ctx: &Ctx, pack: &Pack, old: Option<&LockFile>, policy: Upd
     if loader_spec.kind == LoaderKind::Vanilla
         && pack.all_specs().iter().any(|s| s.kind.unwrap_or_default() == ModKind::Mod && s.source != Source::Modrinth)
     {
-        r.warnings.push("pack is vanilla but contains mods; set pack.loader.kind = \"fabric\"".into());
+        r.warnings.push("pack is vanilla but contains mods; set pack.loader.kind (fabric, quilt, forge or neoforge)".into());
     }
 
     for spec in pack.all_specs() {

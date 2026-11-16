@@ -246,20 +246,19 @@ impl Launcher {
         if exists {
             self.agent_call(id, "join_world", serde_json::json!({"level_id": level_id}), Duration::from_secs(10)).await?;
         } else if w.create.unwrap_or(true) {
-            self.agent_call(
-                id,
-                "create_world",
-                serde_json::json!({
-                    "level_id": level_id,
-                    "name": name,
-                    "flat": w.flat,
-                    "seed": w.seed,
-                    "game_mode": w.game_mode.clone().unwrap_or_else(|| "creative".into()),
-                    "cheats": true,
-                }),
-                Duration::from_secs(10),
-            )
-            .await?;
+            // Created on disk (version-independent), then joined like any existing world.
+            crate::world::create(
+                instance_dir,
+                &crate::world::NewWorld {
+                    level_id: level_id.clone(),
+                    name: name.clone(),
+                    seed: w.seed,
+                    game_mode: w.game_mode.clone().unwrap_or_else(|| "creative".into()),
+                    flat: w.flat,
+                    cheats: true,
+                },
+            )?;
+            self.agent_call(id, "join_world", serde_json::json!({"level_id": level_id}), Duration::from_secs(10)).await?;
         } else {
             return Err(Error::NotFound(format!("world '{level_id}' does not exist")));
         }
@@ -348,8 +347,9 @@ pub(crate) async fn wait_ready_probe(
                 }
             }
         } else if !want_world {
-            // No agent: the sound engine starting is the last step before the title screen.
-            if log_ready_at.is_none() && (s.log_contains)("Sound engine started") {
+            // No agent: the sound engine starting is the last step before the title screen
+            // ("OpenAL initialized." before Minecraft 1.7).
+            if log_ready_at.is_none() && ((s.log_contains)("Sound engine started") || (s.log_contains)("OpenAL initialized.")) {
                 log_ready_at = Some(Instant::now());
             }
             if log_ready_at.is_some_and(|t| t.elapsed() >= Duration::from_secs(3)) {

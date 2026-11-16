@@ -391,7 +391,7 @@ impl Launcher {
         let not_swappable: Vec<&str> = plan.mod_changes.iter().filter(|c| c.status != "updated").map(|c| c.label.as_str()).collect();
         if !not_swappable.is_empty() {
             return Err(format!(
-                "mods were added or removed ({}); Fabric loads mods only at startup",
+                "mods were added or removed ({}); the mod loader loads mods only at startup",
                 not_swappable.join(", ")
             ));
         }

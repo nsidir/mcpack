@@ -1,40 +1,42 @@
+// The mcpack agent: a plain Java agent (no mod loader, no Minecraft dependency) loaded with
+// -javaagent. It reaches the game by reflection, so one jar serves every loader and version.
 plugins {
-	id 'fabric-loom' version "${loom_version}" apply false
+	id 'java'
 }
 
-subprojects {
-	apply plugin: 'fabric-loom'
+group = 'dev.mcpack'
+version = project.mod_version
 
-	def mcVersion = project.name.substring(2) // "mc1.21.1" -> "1.21.1"
-	version = "${mod_version}+${mcVersion}"
-	group = 'dev.mcpack'
-	base { archivesName = 'mcpack-agent' }
+java {
+	// Old Minecraft versions run on Java 8.
+	toolchain { languageVersion = JavaLanguageVersion.of(21) }
+}
 
-	sourceSets.main.java.srcDirs += rootProject.file('common/src/main/java')
+tasks.withType(JavaCompile).configureEach {
+	options.release = 8
+	options.compilerArgs += ['-Xlint:-options']
+	options.encoding = 'UTF-8'
+}
 
-	dependencies {
-		minecraft "com.mojang:minecraft:${mcVersion}"
-		mappings loom.officialMojangMappings()
-		modImplementation "net.fabricmc:fabric-loader:${rootProject.loader_version}"
+jar {
+	archiveBaseName = 'mcpack-agent'
+	manifest {
+		attributes(
+			'Premain-Class': 'dev.mcpack.agent.Boot',
+			'Agent-Class': 'dev.mcpack.agent.Boot',
+			'Implementation-Title': 'mcpack-agent',
+			'Implementation-Version': project.version,
+		)
 	}
+	// Reproducible bytes: the launcher embeds this jar.
+	preserveFileTimestamps = false
+	reproducibleFileOrder = true
+}
 
-	processResources {
-		def v = project.version
-		inputs.property 'version', v
-		filesMatching('fabric.mod.json') { expand 'version': v }
-	}
-
-	tasks.withType(JavaCompile).configureEach { it.options.release = 17 }
-	java {
-		sourceCompatibility = JavaVersion.VERSION_17
-		targetCompatibility = JavaVersion.VERSION_17
-	}
-
-	// Copy the remapped jar into agent-mod/dist so the Rust launcher can embed it.
-	tasks.register('dist', Copy) {
-		dependsOn remapJar
-		from remapJar.archiveFile
-		into rootProject.file('dist')
-		rename { "mcpack-agent-${mcVersion}.jar" }
-	}
+// Copy the jar into agent-mod/dist so the Rust launcher can embed it.
+tasks.register('dist', Copy) {
+	dependsOn jar
+	from jar.archiveFile
+	into file('dist')
+	rename { 'mcpack-agent.jar' }
 }

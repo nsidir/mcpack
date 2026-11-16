@@ -3,6 +3,15 @@
 
 export type Loader = "fabric" | "quilt" | "forge" | "neoforge" | "vanilla";
 
+/** Display names of the loaders. */
+export const LOADER_LABEL: Record<Loader, string> = {
+  fabric: "Fabric",
+  quilt: "Quilt",
+  forge: "Forge",
+  neoforge: "NeoForge",
+  vanilla: "Vanilla",
+};
+
 export interface Pack {
   /** Stable id — the pack directory. */
   id: string;
@@ -229,6 +238,8 @@ export interface Backend {
   info(): Promise<BackendInfo>;
   listPacks(): Promise<Pack[]>;
   createPack(input: { name: string; minecraft: string; loader: Loader }): Promise<Pack>;
+  /** Minecraft releases, newest first (with `snapshots`, snapshots too). */
+  minecraftVersions(snapshots?: boolean): Promise<string[]>;
   content(packId: string): Promise<ContentEntry[]>;
   search(packId: string, query: string, kind: ContentKind): Promise<SearchHit[]>;
   /** Add a project, or re-pin one that is already in the pack. Without `version`: latest compatible. */

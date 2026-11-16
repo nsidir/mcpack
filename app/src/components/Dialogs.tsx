@@ -24,7 +24,7 @@ import {
   Sun,
   Upload,
 } from "lucide-react";
-import { backend, type ContentKind, type Loader, PACK_FORMATS, type PackFormat, type SearchHit, type VersionSummary } from "../api";
+import { backend, type ContentKind, type Loader, LOADER_LABEL, PACK_FORMATS, type PackFormat, type SearchHit, type VersionSummary } from "../api";
 import { agentAction, importPack, isActive, launch, openUrl, pageUrl, profileOf, stop, usePack, useStore } from "../store";
 import { CustomContentForm, versionArg, VersionList } from "./ContentDialogs";
 import { Badge, Button, fmt, IconButton, Kbd, Modal, Segmented } from "./ui";
@@ -325,19 +325,34 @@ export function AddContentDialog() {
 
 // ----------------------------------------------------------------- new pack
 
-const MC_VERSIONS = ["1.21.4", "1.21.1", "1.20.1"];
+/** Shown until the launcher's version list arrives (or when it cannot be fetched). */
+const FALLBACK_MC_VERSIONS = ["1.21.1", "1.20.1"];
 const LOADERS: Loader[] = ["fabric", "quilt", "neoforge", "forge", "vanilla"];
 
 export function NewPackDialog() {
   const isOpen = useStore((s) => s.dialog === "new-pack");
   const open = useStore((s) => s.open);
   const [name, setName] = useState("");
-  const [minecraft, setMinecraft] = useState(MC_VERSIONS[1]);
+  const [versions, setVersions] = useState<string[]>(FALLBACK_MC_VERSIONS);
+  const [minecraft, setMinecraft] = useState(FALLBACK_MC_VERSIONS[0]);
   const [loader, setLoader] = useState<Loader>("fabric");
   const [busy, setBusy] = useState(false);
 
   useEffect(() => {
-    if (isOpen) setName("");
+    if (!isOpen) return;
+    setName("");
+    let live = true;
+    backend
+      .minecraftVersions()
+      .then((v) => {
+        if (!live || v.length === 0) return;
+        setVersions(v);
+        setMinecraft((cur) => (v.includes(cur) && cur !== FALLBACK_MC_VERSIONS[0] ? cur : v[0]));
+      })
+      .catch(() => {});
+    return () => {
+      live = false;
+    };
   }, [isOpen]);
 
   const submit = async (e: FormEvent) => {
@@ -365,7 +380,7 @@ export function NewPackDialog() {
             <div className="field">
               <label htmlFor="np-mc">Minecraft</label>
               <select id="np-mc" className="select" value={minecraft} onChange={(e) => setMinecraft(e.target.value)}>
-                {MC_VERSIONS.map((v) => (
+                {versions.map((v) => (
                   <option key={v}>{v}</option>
                 ))}
               </select>
@@ -375,7 +390,7 @@ export function NewPackDialog() {
               <select id="np-loader" className="select" value={loader} onChange={(e) => setLoader(e.target.value as Loader)}>
                 {LOADERS.map((l) => (
                   <option key={l} value={l}>
-                    {l[0].toUpperCase() + l.slice(1)}
+                    {LOADER_LABEL[l]}
                   </option>
                 ))}
               </select>

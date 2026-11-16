@@ -8,8 +8,9 @@
 //! - A **pack** is a directory with `pack.toml` (declarative source of truth) and `pack.lock`
 //!   (resolved, pinned content). Profiles in `pack.toml` overlay settings/mods.
 //! - An **instance** is `<pack>/run/<profile>`, kept in sync with the pack by [`Launcher::sync`].
-//! - A **session** is a running game process with captured logs and (for Fabric/Quilt) an
-//!   in-game automation agent for commands, screenshots, world control and live reloads.
+//! - A **session** is a running game process with captured logs and an in-game automation
+//!   agent (a `-javaagent`, so it works on vanilla, Fabric, Quilt, Forge and NeoForge) for
+//!   commands, screenshots, world control and live reloads.
 
 pub mod agent;
 pub mod cfpack;
@@ -36,6 +37,7 @@ pub mod source;
 pub mod testing;
 pub mod util;
 pub mod watch;
+pub mod world;
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -207,8 +209,9 @@ impl Launcher {
         Ok(v.into_iter().map(|(v, s)| serde_json::json!({"version": v, "stable": s})).collect())
     }
 
-    pub fn agent_versions(&self) -> Vec<&'static str> {
-        agent::supported_versions()
+    /// Where the in-game agent works.
+    pub fn agent_support(&self) -> &'static str {
+        agent::SUPPORT_SUMMARY
     }
 
     // ------------------------------------------------------------------ packs
@@ -463,19 +466,22 @@ impl Launcher {
             }
         }
         let inst = paths::instance_dir(&dir, profile);
-        let (mods, non_mods) = check::scan_mods_dir(&inst.join("mods"))?;
+        let (mods, non_mods) = check::scan_mods_dir(&inst.join("mods"), lock.loader)?;
         let java_major = install::version_json(&self.ctx, &eff.minecraft, lock.loader, &lock.loader_version)
             .await
             .ok()
             .and_then(|v| v.java_version.map(|j| j.major_version))
             .or(Some(17));
         if lock.loader != LoaderKind::Vanilla {
-            problems.extend(check::check_mods(&mods, &eff.minecraft, java_major, &lock.loader_version));
+            problems.extend(check::check_mods(&mods, &eff.minecraft, java_major, lock.loader, &lock.loader_version));
         } else if !mods.is_empty() {
             problems.push(Problem::warning("vanilla_with_mods", "pack is vanilla but mods/ contains mod jars; they will not load"));
         }
         for f in non_mods {
-            problems.push(Problem::warning("not_a_mod", format!("mods/{f} has no fabric.mod.json/quilt.mod.json")));
+            problems.push(Problem::warning(
+                "not_a_mod",
+                format!("mods/{f} has no mod metadata (fabric.mod.json, quilt.mod.json, mods.toml, neoforge.mods.toml or mcmod.info)"),
+            ));
         }
         let ok = !problems.iter().any(|p| p.severity == "error");
         Ok(CheckReport {
@@ -601,7 +607,7 @@ impl Launcher {
             .clone()
             .or_else(|| eff.username.clone())
             .unwrap_or_else(|| self.ctx.cfg().username);
-        let params = launch::args::LaunchParams {
+        let mut params = launch::args::LaunchParams {
             uuid: util::offline_uuid(&username),
             username,
             game_dir: paths::instance_dir(dir, &profile),
@@ -613,8 +619,8 @@ impl Launcher {
             height: eff.jvm.height,
             quick_play_world: opts.world.clone(),
         };
-        let agent = if sync.agent { Some(AgentEndpoint::new()?) } else { None };
         let mut sync = sync;
+        let agent = if sync.agent { self.agent_args(&inst, &mut params.extra_jvm, &mut sync.warnings).await? } else { None };
         let hotswap = if pack.file.dev.hotswap {
             match hotswap::endpoint_for(&inst.java) {
                 Ok(h) => Some(h),
@@ -626,6 +632,7 @@ impl Launcher {
         } else {
             None
         };
+        install::link_legacy_resources(&inst, &params.game_dir)?;
         prog("launch", None, "starting the game".into());
         let session = launch::spawn(
             &inst,
@@ -645,6 +652,24 @@ impl Launcher {
             ev.progress_profile(Some(&pack_s), Some(&profile), Some(&session.id), "agent", None, "waiting for the in-game agent");
         }
         Ok(LaunchResult { session: session.status(), sync, install: summary })
+    }
+
+    /// Agent JVM arguments for this game, or `None` (with a warning) when it cannot be used.
+    async fn agent_args(&self, inst: &install::GameInstall, jvm: &mut Vec<String>, warnings: &mut Vec<String>) -> Result<Option<AgentEndpoint>> {
+        let Some(jar) = agent::jar(&self.ctx.paths.agent_dir())? else {
+            warnings.push("this mcpack build has no agent jar; in-game automation disabled".into());
+            return Ok(None);
+        };
+        let support = match agent::mappings::prepare(&self.ctx, inst).await {
+            Ok(s) => s,
+            Err(e) => agent::AgentSupport::Unsupported(format!("agent name mappings unavailable: {e}")),
+        };
+        if let agent::AgentSupport::Unsupported(why) = &support {
+            warnings.push(format!("{why}; in-game automation disabled"));
+            return Ok(None);
+        }
+        jvm.extend(agent::jvm_args(&jar, &support, &inst.minecraft, inst.loader));
+        Ok(Some(AgentEndpoint::new()?))
     }
 
     /// Stop a session: graceful (agent `exit`) first, then kill after `grace`.

@@ -1,5 +1,6 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 
+
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 
@@ -163,6 +164,9 @@ pub struct AssetIndexRef {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct VersionDownloads {
     pub client: Artifact,
+    /// Mojang's ProGuard mappings for the client (1.14.4 – 1.21.11; later versions are not obfuscated).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub client_mappings: Option<Artifact>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -290,16 +294,16 @@ impl Library {
                     Some(p) => p.clone(),
                     None => util::maven_path(&self.name)?,
                 };
-                if !a.url.is_empty() {
-                    out.push(LibFile {
-                        name: self.name.clone(),
-                        path,
-                        url: a.url.clone(),
-                        sha1: a.sha1.clone(),
-                        size: a.size,
-                        extract_natives: false,
-                    });
-                }
+                // An empty URL means the file is produced locally (Forge installer output or
+                // a jar bundled in the installer): classpath entry, nothing to download.
+                out.push(LibFile {
+                    name: self.name.clone(),
+                    path,
+                    url: a.url.clone(),
+                    sha1: a.sha1.clone(),
+                    size: a.size,
+                    extract_natives: false,
+                });
             }
             None if self.natives.is_none() => {
                 let path = util::maven_path(&self.name)?;
@@ -320,12 +324,26 @@ impl Library {
         if let Some(natives) = &self.natives {
             if let Some(classifier) = natives.get(p.os) {
                 let classifier = classifier.replace("${arch}", if p.is_64bit() { "64" } else { "32" });
-                if let Some(a) = self
+                let from_downloads = self
                     .downloads
                     .as_ref()
                     .and_then(|d| d.classifiers.as_ref())
-                    .and_then(|c| c.get(&classifier))
-                {
+                    .and_then(|c| c.get(&classifier));
+                if from_downloads.is_none() && self.downloads.is_none() {
+                    // Old-style profile: natives jar next to the artifact in a maven repo.
+                    let path = util::maven_path(&format!("{}:{classifier}", self.name))?;
+                    let base = self.url.clone().unwrap_or_else(|| LIBRARIES_URL.to_string());
+                    let base = if base.ends_with('/') { base } else { format!("{base}/") };
+                    out.push(LibFile {
+                        name: format!("{}:{classifier}", self.name),
+                        url: format!("{base}{path}"),
+                        path,
+                        sha1: None,
+                        size: None,
+                        extract_natives: true,
+                    });
+                }
+                if let Some(a) = from_downloads {
                     let path = match &a.path {
                         Some(p) => p.clone(),
                         None => util::maven_path(&format!("{}:{classifier}", self.name))?,
@@ -348,16 +366,22 @@ impl Library {
 /// Merge a child profile (e.g. Fabric) onto its parent vanilla version.
 /// Child libraries win over parent libraries with the same `group:artifact[:classifier]`.
 pub fn merge_versions(parent: &VersionJson, child: &VersionJson) -> VersionJson {
-    let mut seen = HashSet::new();
-    let mut libraries = Vec::new();
-    for lib in child.libraries.iter().chain(parent.libraries.iter()) {
-        let key = util::maven_key(&lib.name);
-        // natives-style keys may legitimately repeat with different rules; keep those.
-        let unique_key = if lib.rules.is_some() { format!("{key}#{:?}", lib.rules.as_ref().map(|r| r.len())) } else { key };
-        if seen.insert(unique_key) {
+    // The child replaces parent libraries with the same group:artifact[:classifier]. The
+    // parent's own entries are all kept: vanilla lists one artifact several times (plain and
+    // natives entries, different versions per OS), and collapsing those loses natives.
+    let child_keys: HashSet<String> = child.libraries.iter().map(|l| util::maven_key(&l.name)).collect();
+    let mut libraries: Vec<Library> = Vec::new();
+    for lib in &child.libraries {
+        // Legacy Forge profiles repeat vanilla libraries without download info (natives
+        // classifiers in particular); the vanilla entries of the same version are better.
+        let same: Vec<&Library> = parent.libraries.iter().filter(|p| p.name == lib.name && p.downloads.is_some()).collect();
+        if lib.downloads.is_none() && !same.is_empty() {
+            libraries.extend(same.into_iter().cloned());
+        } else {
             libraries.push(lib.clone());
         }
     }
+    libraries.extend(parent.libraries.iter().filter(|l| !child_keys.contains(&util::maven_key(&l.name))).cloned());
     let arguments = match (&parent.arguments, &child.arguments) {
         (None, None) => None,
         (p, c) => {
@@ -414,5 +438,40 @@ mod tests {
         }];
         assert!(!rules_allow(Some(&feat), &p, &f));
         assert!(rules_allow(Some(&feat), &p, &Features::default().with("has_custom_resolution", true)));
+    }
+
+    fn lib(name: &str, natives: bool, with_downloads: bool) -> Library {
+        Library {
+            name: name.into(),
+            natives: natives.then(|| HashMap::from([("windows".to_string(), "natives-windows".to_string())])),
+            downloads: with_downloads.then(LibDownloads::default),
+            rules: Some(vec![Rule { action: "allow".into(), os: None, features: None }]),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn merge_keeps_parent_natives_and_child_overrides() {
+        let parent = VersionJson {
+            id: "1.16.5".into(),
+            libraries: vec![
+                lib("org.lwjgl:lwjgl:3.2.1", false, true),
+                lib("org.lwjgl:lwjgl:3.2.2", false, true),
+                lib("org.lwjgl:lwjgl:3.2.1", true, true),
+                lib("org.lwjgl:lwjgl:3.2.2", true, true),
+                lib("org.ow2.asm:asm:9.0", false, true),
+            ],
+            ..Default::default()
+        };
+        let child = VersionJson { id: "x".into(), libraries: vec![lib("org.ow2.asm:asm:9.6", false, false)], ..Default::default() };
+        let m = merge_versions(&parent, &child);
+        assert_eq!(m.libraries.len(), 5);
+        assert_eq!(m.libraries.iter().filter(|l| l.name.starts_with("org.ow2.asm")).map(|l| l.name.as_str()).collect::<Vec<_>>(), ["org.ow2.asm:asm:9.6"]);
+        assert_eq!(m.libraries.iter().filter(|l| l.natives.is_some()).count(), 2);
+        // Legacy Forge: a child entry without downloads takes the vanilla entries of that version.
+        let legacy_child = VersionJson { id: "f".into(), libraries: vec![lib("org.lwjgl:lwjgl:3.2.2", true, false)], ..Default::default() };
+        let m = merge_versions(&parent, &legacy_child);
+        assert_eq!(m.libraries.iter().filter(|l| l.name == "org.lwjgl:lwjgl:3.2.2").count(), 2);
+        assert!(m.libraries.iter().all(|l| l.downloads.is_some()));
     }
 }

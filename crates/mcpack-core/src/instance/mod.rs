@@ -12,10 +12,8 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-use crate::agent;
 use crate::error::{IoContext, Result};
 use crate::http::DownloadItem;
-use crate::meta::loader::LoaderKind;
 use crate::pack::lock::{LockEntry, LockFile};
 use crate::pack::schema::{ConfigReload, ModKind, Source};
 use crate::pack::Pack;
@@ -118,7 +116,7 @@ pub fn launch_fingerprint(pack: &Pack, lock: &LockFile, profile: &str, agent: bo
 /// Should the agent be injected for this profile?
 pub fn agent_enabled(pack: &Pack, profile: &str, override_: Option<bool>) -> Result<bool> {
     let eff = pack.effective(profile)?;
-    Ok(override_.unwrap_or(eff.agent) && pack.file.pack.loader.kind != LoaderKind::Vanilla)
+    Ok(override_.unwrap_or(eff.agent))
 }
 
 struct Desired {
@@ -216,29 +214,9 @@ pub async fn sync_opts(
     }
 
     // ---- 2. Agent ----
-    let agent_on = agent_enabled(pack, profile, agent_override)?;
-    report.agent = false;
-    if agent_on {
-        match agent::jar_for(&ctx.paths.agent_dir(), &eff.minecraft)? {
-            Some(jar) => {
-                let sha1 = util::sha1_file(&jar)?;
-                desired.push(Desired {
-                    rel: format!("mods/{}", agent::AGENT_FILENAME),
-                    src: jar,
-                    sha1,
-                    kind: Some(ModKind::Mod),
-                    label: "mcpack-agent".into(),
-                    local: false,
-                });
-                report.agent = true;
-            }
-            None => report.warnings.push(format!(
-                "no mcpack agent for Minecraft {} (available: {}); in-game automation disabled",
-                eff.minecraft,
-                agent::supported_versions().join(", ")
-            )),
-        }
-    }
+    // The agent is a -javaagent added at launch (not a mod), so it has no files here. A jar
+    // left in mods/ by older mcpack versions is removed below as unmanaged-by-now content.
+    report.agent = agent_enabled(pack, profile, agent_override)?;
 
     // ---- 3. Apply content ----
     let desired_rels: BTreeSet<&str> = desired.iter().map(|d| d.rel.as_str()).collect();

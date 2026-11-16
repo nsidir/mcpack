@@ -76,7 +76,7 @@ enum Fix {
     RaiseMemory,
 }
 
-/// Known Fabric mod ids → Modrinth slugs.
+/// Known mod ids (Fabric, Quilt, Forge, NeoForge) → Modrinth slugs.
 fn known_slug(mod_id: &str) -> Option<&'static str> {
     let id = mod_id.to_ascii_lowercase();
     if id == "fabric" || id == "fabric-api" || id.starts_with("fabric-") && (id.ends_with("-v0") || id.ends_with("-v1") || id.ends_with("-v2") || id.ends_with("-v3") || id.ends_with("-base") || id.contains("-api")) {
@@ -122,6 +122,26 @@ fn known_slug(mod_id: &str) -> Option<&'static str> {
         ("azurelib", "azurelib"),
         ("patchouli", "patchouli"),
         ("playeranimator", "playeranimator"),
+        // Common Forge / NeoForge library mods.
+        ("jei", "jei"),
+        ("curios", "curios"),
+        ("citadel", "citadel"),
+        ("moonlight", "moonlight"),
+        ("framework", "framework"),
+        ("creativecore", "creativecore"),
+        ("blueprint", "blueprint"),
+        ("ftblibrary", "ftb-library-forge"),
+        ("rhino", "rhino"),
+        ("kubejs", "kubejs"),
+        ("mixinextras", "mixinextras"),
+        ("zeta", "zeta"),
+        ("placebo", "placebo"),
+        ("cupboard", "cupboard"),
+        ("configured", "configured"),
+        ("supermartijn642corelib", "supermartijn642s-core-lib"),
+        ("supermartijn642configlib", "supermartijn642s-config-lib"),
+        ("sophisticatedcore", "sophisticated-core"),
+        ("glitchcore", "glitchcore"),
         ("player-animator", "playeranimator"),
         ("creativecore", "creativecore"),
         ("cristellib", "cristel-lib"),

@@ -143,7 +143,7 @@ pub fn all_definitions() -> Vec<Value> {
         tool(
             "loader_versions",
             "List loader versions for a Minecraft version.",
-            json!({"loader": {"type": "string", "enum": ["fabric", "quilt"]}, "minecraft": {"type": "string"}}),
+            json!({"loader": {"type": "string", "enum": ["fabric", "quilt", "forge", "neoforge"]}, "minecraft": {"type": "string"}}),
             &["loader", "minecraft"],
         ),
         tool("pack_list", "Known packs with status (lock synced/stale, watch, running).", json!({}), &[]),
@@ -152,7 +152,7 @@ pub fn all_definitions() -> Vec<Value> {
             "Create a new pack (pack.toml with a `test` profile). Without `dir`, creates <home>/packs/<name>.",
             json!({
                 "dir": {"type": "string"}, "name": {"type": "string"}, "minecraft": {"type": "string", "description": "e.g. 1.21.1"},
-                "loader": {"type": "string", "enum": ["fabric", "quilt", "vanilla"], "description": "default fabric"},
+                "loader": {"type": "string", "enum": ["fabric", "quilt", "forge", "neoforge", "vanilla"], "description": "default fabric"},
                 "loader_version": {"type": "string"},
             }),
             &["minecraft"],
@@ -275,7 +275,7 @@ pub fn all_definitions() -> Vec<Value> {
         tool("world_leave", "Save and leave the current world.", sess(), &[]),
         tool(
             "agent_call",
-            "Call any in-game agent method: ping, status, command, client_command, chat, reload_resources, reload_datapacks, screenshot, create_world, join_world, leave_world, exit.",
+            "Call any in-game agent method: ping, status, command, client_command, chat, reload_resources, reload_datapacks, screenshot, join_world, leave_world, exit (create worlds with world_enter). The agent works on every loader for Minecraft 1.14.4+ and on vanilla/Forge 1.7.10 – 1.12.2.",
             with_sess(json!({"method": {"type": "string"}, "params": {"type": "object"}})),
             &["method"],
         ),
@@ -508,7 +508,8 @@ async fn dispatch(l: &Launcher, tool: &str, a: &Value) -> Result<Value> {
             "version": env!("CARGO_PKG_VERSION"),
             "home": l.home().display().to_string(),
             "mode": "native",
-            "agent_minecraft_versions": l.agent_versions(),
+            "agent_support": l.agent_support(),
+            "loaders": ["vanilla", "fabric", "quilt", "forge", "neoforge"],
         })),
         "config_get" => to(l.config()),
         "config_set" => {
@@ -769,7 +770,20 @@ async fn dispatch(l: &Launcher, tool: &str, a: &Value) -> Result<Value> {
         "agent_call" => {
             let id = session_arg(l, a)?;
             let params = a.get("params").cloned().unwrap_or_else(|| json!({}));
-            l.agent_call(&id, &req(a, "method")?, params, secs("timeout_secs", 60)).await
+            let method = req(a, "method")?;
+            if method == "create_world" {
+                // Worlds are created by the launcher now (works on every version); keep the old method.
+                let p = |k: &str| params.get(k).cloned();
+                let opts = WorldOptions {
+                    name: p("level_id").or_else(|| p("name")).and_then(|v| v.as_str().map(str::to_string)),
+                    create: Some(true),
+                    flat: p("flat").and_then(|v| v.as_bool()).unwrap_or(false),
+                    seed: p("seed").and_then(|v| v.as_i64()),
+                    game_mode: p("game_mode").and_then(|v| v.as_str().map(str::to_string)),
+                };
+                return l.world_enter(&id, opts, secs("timeout_secs", 180)).await;
+            }
+            l.agent_call(&id, &method, params, secs("timeout_secs", 60)).await
         }
         "watch_start" => to(l.watch_start(&pack_arg(a)?, &profile_arg(a), s(a, "session")).await?),
         "watch_stop" => {

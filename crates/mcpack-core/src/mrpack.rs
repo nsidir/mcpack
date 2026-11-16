@@ -123,6 +123,14 @@ impl Launcher {
             LoaderKind::Quilt => {
                 deps.insert("quilt-loader".into(), lock.loader_version.clone());
             }
+            LoaderKind::Forge => {
+                // Old Forge builds carry the Minecraft version as a suffix ("10.13.4.1614-1.7.10").
+                let short = lock.loader_version.strip_suffix(&format!("-{}", eff.minecraft)).unwrap_or(&lock.loader_version);
+                deps.insert("forge".into(), short.to_string());
+            }
+            LoaderKind::NeoForge => {
+                deps.insert("neoforge".into(), lock.loader_version.clone());
+            }
             LoaderKind::Vanilla => {}
         }
         let index = Index {
@@ -196,15 +204,7 @@ impl Launcher {
             .get("minecraft")
             .cloned()
             .ok_or_else(|| Error::Invalid("mrpack has no minecraft dependency".into()))?;
-        let (loader, lv) = if let Some(v) = index.dependencies.get("fabric-loader") {
-            (LoaderKind::Fabric, v.clone())
-        } else if let Some(v) = index.dependencies.get("quilt-loader") {
-            (LoaderKind::Quilt, v.clone())
-        } else if index.dependencies.keys().any(|k| k == "forge" || k == "neoforge") {
-            return Err(Error::Invalid("Forge/NeoForge packs are not supported yet".into()));
-        } else {
-            (LoaderKind::Vanilla, "latest".into())
-        };
+        let (loader, lv) = mrpack_loader(&index.dependencies);
         let re = regex::Regex::new(r"cdn\.modrinth\.com/data/([A-Za-z0-9]+)/versions/([A-Za-z0-9]+)/").expect("regex");
         let mut warnings = Vec::new();
         let mut mods = Vec::new();
@@ -287,5 +287,34 @@ impl Launcher {
             overrides,
             warnings,
         })
+    }
+}
+
+/// The loader of a `.mrpack` from its `dependencies` (`fabric-loader`, `quilt-loader`, `forge`, `neoforge`).
+pub fn mrpack_loader(deps: &BTreeMap<String, String>) -> (LoaderKind, String) {
+    for (key, kind) in [
+        ("fabric-loader", LoaderKind::Fabric),
+        ("quilt-loader", LoaderKind::Quilt),
+        ("neoforge", LoaderKind::NeoForge),
+        ("forge", LoaderKind::Forge),
+    ] {
+        if let Some(v) = deps.get(key) {
+            return (kind, v.clone());
+        }
+    }
+    (LoaderKind::Vanilla, "latest".into())
+}
+
+#[cfg(test)]
+mod loader_tests {
+    use super::*;
+
+    #[test]
+    fn mrpack_loaders() {
+        let deps = |k: &str, v: &str| BTreeMap::from([("minecraft".to_string(), "1.20.1".to_string()), (k.to_string(), v.to_string())]);
+        assert_eq!(mrpack_loader(&deps("forge", "47.3.0")), (LoaderKind::Forge, "47.3.0".into()));
+        assert_eq!(mrpack_loader(&deps("neoforge", "21.1.77")), (LoaderKind::NeoForge, "21.1.77".into()));
+        assert_eq!(mrpack_loader(&deps("quilt-loader", "0.26.0")), (LoaderKind::Quilt, "0.26.0".into()));
+        assert_eq!(mrpack_loader(&BTreeMap::new()).0, LoaderKind::Vanilla);
     }
 }

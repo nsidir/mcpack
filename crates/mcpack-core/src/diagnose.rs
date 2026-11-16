@@ -58,7 +58,7 @@ pub struct Diagnosis {
     pub crash_report: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub crash_description: Option<String>,
-    /// Fabric loader's own suggested fixes ("Install X", "Replace Y").
+    /// The mod loader's own suggested fixes ("Install X", "Replace Y").
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub loader_suggestions: Vec<String>,
     /// Most relevant log/stack lines.
@@ -68,6 +68,11 @@ pub struct Diagnosis {
 
 struct Patterns {
     requires: Regex,
+    forge_dep: Regex,
+    forge_requires: Regex,
+    neoforge_missing: Regex,
+    legacy_requires: Regex,
+    wrong_loader: Regex,
     incompatible: Regex,
     duplicate: Regex,
     mixin_mod: Regex,
@@ -83,6 +88,19 @@ struct Patterns {
 fn patterns() -> &'static Patterns {
     static P: OnceLock<Patterns> = OnceLock::new();
     P.get_or_init(|| Patterns {
+        // Forge 1.18+: "Mod ID: 'architectury', Requested by: 'ftblibrary', Expected range: '[9,)', Actual version: '[MISSING]'"
+        forge_dep: Regex::new(
+            r"Mod ID: '(?P<dep>[^']+)', Requested by: '(?P<id>[^']+)', Expected range: '(?P<range>[^']*)', Actual version: '(?P<actual>[^']*)'",
+        )
+        .unwrap(),
+        // Forge 1.13 – 1.17 / NeoForge: "Mod ftblibrary requires architectury 9.1.10 or above"
+        forge_requires: Regex::new(r"\bMod (?P<id>[a-z0-9_.\-]+) (?:only )?requires (?P<dep>[a-z0-9_.\-]+) (?P<req>[^\n]+?)\s*$").unwrap(),
+        // NeoForge: "Currently, architectury is not installed"
+        neoforge_missing: Regex::new(r"Currently, (?P<dep>[a-z0-9_.\-]+) is not installed").unwrap(),
+        // FML 1.7 – 1.12: "Mod jei (Just Enough Items) requires [forge@[14.23.5.2816,)]"
+        legacy_requires: Regex::new(r"Mod (?P<id>\S+) \((?P<name>[^)]*)\) requires \[(?P<deps>[^\n]*)\]").unwrap(),
+        // NeoForge/Forge: "File sodium.jar is a Fabric mod and cannot be loaded"
+        wrong_loader: Regex::new(r"(?:File|Mod file) (?P<file>.+?) is (?:a|an) (?P<loader>Fabric|Quilt|Forge|NeoForge|LiteLoader|Rift)(?: mod)?(?: and)? cannot be loaded").unwrap(),
         requires: Regex::new(
             r"Mod '(?P<name>[^']+)' \((?P<id>[^)]+)\) (?P<ver>\S+) requires (?P<req>.+?) of (?:mod )?'(?P<dep>[^']+)'(?: \((?P<depid>[^)]+)\))?,? (?P<rest>.*)$",
         )
@@ -126,6 +144,23 @@ fn mod_for_class(class: &str) -> Option<&'static str> {
         ("vazkii.patchouli", "patchouli"),
         ("mod.azure.azurelib", "azurelib"),
         ("eu.midnightdust.lib", "midnightlib"),
+        ("top.theillusivec4.curios", "curios"),
+        ("mezz.jei", "jei"),
+        ("com.github.alexthe666.citadel", "citadel"),
+        ("net.blay09.mods.balm", "balm"),
+        ("thedarkcolour.kotlinforforge", "kotlin-for-forge"),
+        ("com.mrcrayfish.framework", "framework"),
+        ("net.mehvahdjukaar.moonlight", "moonlight"),
+        ("dev.ftb.mods.ftblibrary", "ftb-library-forge"),
+        ("team.creative.creativecore", "creativecore"),
+        ("com.teamabnormals.blueprint", "blueprint"),
+        ("vazkii.autoreglib", "autoreglib"),
+        ("dev.latvian.mods.rhino", "rhino"),
+        ("dev.latvian.mods.kubejs", "kubejs"),
+        ("com.llamalad7.mixinextras", "mixinextras"),
+        ("fuzs.forgeconfigapiport", "forge-config-api-port"),
+        ("net.minecraftforge.", "forge"),
+        ("net.neoforged.", "neoforge"),
     ];
     MAP.iter().find(|(p, _)| c.starts_with(p)).map(|(_, m)| *m)
 }
@@ -170,6 +205,62 @@ pub fn analyze(log: &[String], crash: Option<(&Path, &str)>, exit_code: Option<i
                 )
             };
             push(&mut d, Problem::error(kind, msg).mods(vec![modid, dep]).suggest(sugg).evidence(l.trim()));
+        } else if let Some(c) = p.forge_dep.captures(l) {
+            let (dep, modid, range, actual) = (c["dep"].to_string(), c["id"].to_string(), &c["range"], &c["actual"]);
+            let pr = if actual.contains("MISSING") {
+                Problem::error("missing_dependency", format!("{modid} requires {dep} {range}, which is missing"))
+                    .suggest(format!("add '{dep}' to the pack (pack_add id=\"{dep}\"; use search_mods if the id differs on Modrinth)"))
+            } else {
+                Problem::error("wrong_dependency_version", format!("{modid} requires {dep} {range} but {actual} is present")).suggest(
+                    if dep == "minecraft" {
+                        format!("'{modid}' targets a different Minecraft version; pin a compatible version or remove it")
+                    } else {
+                        format!("change the version of '{dep}' or '{modid}' (mod_versions lists candidates)")
+                    },
+                )
+            };
+            push(&mut d, pr.mods(vec![modid, dep]).evidence(l.trim()));
+        } else if let Some(c) = p.legacy_requires.captures(l) {
+            let modid = c["id"].to_string();
+            for dep in c["deps"].split(", ") {
+                let (dep_id, range) = dep.split_once('@').unwrap_or((dep, ""));
+                push(
+                    &mut d,
+                    Problem::error("missing_dependency", format!("{} ({modid}) requires {dep_id} {range}", &c["name"]))
+                        .mods(vec![modid.clone(), dep_id.to_string()])
+                        .suggest(format!("add or update '{dep_id}' (pack_add id=\"{dep_id}\")"))
+                        .evidence(l.trim()),
+                );
+            }
+        } else if let Some(c) = p.forge_requires.captures(l) {
+            let (modid, dep) = (c["id"].to_string(), c["dep"].to_string());
+            if modid != "'" && !l.contains("Mod '") {
+                push(
+                    &mut d,
+                    Problem::error("missing_dependency", format!("{modid} requires {dep} {}", c["req"].trim()))
+                        .mods(vec![modid, dep.clone()])
+                        .suggest(format!("add or update '{dep}' (pack_add id=\"{dep}\")"))
+                        .evidence(l.trim()),
+                );
+            }
+        } else if let Some(c) = p.neoforge_missing.captures(l) {
+            let dep = c["dep"].to_string();
+            push(
+                &mut d,
+                Problem::error("missing_dependency", format!("'{dep}' is required but not installed"))
+                    .mods(vec![dep.clone()])
+                    .suggest(format!("add '{dep}' to the pack (pack_add id=\"{dep}\")"))
+                    .evidence(l.trim()),
+            );
+        } else if let Some(c) = p.wrong_loader.captures(l) {
+            let file = c["file"].trim().to_string();
+            push(
+                &mut d,
+                Problem::error("wrong_loader", format!("{file} is a {} mod and cannot be loaded by this pack's loader", &c["loader"]))
+                    .files(vec![file])
+                    .suggest("replace it with the version of the mod for this pack's loader, or remove it")
+                    .evidence(l.trim()),
+            );
         } else if let Some(c) = p.incompatible.captures(l) {
             let modid = c["id"].to_string();
             let dep = c.name("depid").or(c.name("dep")).map(|m| m.as_str().to_string()).unwrap_or_default();
@@ -367,6 +458,29 @@ pub fn latest_log(instance: &Path) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn forge_missing_deps() {
+        let log = vec![
+            "Missing or unsupported mandatory dependencies:".to_string(),
+            "\tMod ID: 'architectury', Requested by: 'ftblibrary', Expected range: '[9.1.10,)', Actual version: '[MISSING]'".to_string(),
+            "\tMod ID: 'minecraft', Requested by: 'jei', Expected range: '[1.20,1.21)', Actual version: '1.21.1'".to_string(),
+        ];
+        let d = analyze(&log, None, Some(1));
+        assert!(d.problems.iter().any(|p| p.kind == "missing_dependency" && p.mods == vec!["ftblibrary", "architectury"]));
+        assert!(d.problems.iter().any(|p| p.kind == "wrong_dependency_version" && p.mods.contains(&"jei".to_string())));
+        let neo = vec![
+            "Mod ftblibrary requires architectury 9.1.10 or above".to_string(),
+            "Currently, architectury is not installed".to_string(),
+            "File sodium-fabric-0.6.0.jar is a Fabric mod and cannot be loaded".to_string(),
+        ];
+        let d = analyze(&neo, None, Some(1));
+        assert!(d.problems.iter().any(|p| p.kind == "missing_dependency" && p.mods.contains(&"architectury".to_string())));
+        assert!(d.problems.iter().any(|p| p.kind == "wrong_loader"));
+        let legacy = vec!["net.minecraftforge.fml.common.MissingModsException: Mod jeresources (Just Enough Resources) requires [jei@[4.15,)]".to_string()];
+        let d = analyze(&legacy, None, Some(1));
+        assert!(d.problems.iter().any(|p| p.kind == "missing_dependency" && p.mods == vec!["jeresources", "jei"]));
+    }
 
     #[test]
     fn fabric_missing_dep() {

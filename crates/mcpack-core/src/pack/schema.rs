@@ -275,7 +275,7 @@ pub struct Profile {
     /// Base mods to leave out in this profile (by id/slug/filename).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub disable: Vec<String>,
-    /// Inject the mcpack automation agent (default: true for fabric/quilt).
+    /// Inject the mcpack automation agent (default: true).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agent: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

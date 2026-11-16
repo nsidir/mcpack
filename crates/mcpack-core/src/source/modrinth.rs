@@ -99,10 +99,10 @@ fn project_type_facet(k: ModKind) -> &'static str {
     }
 }
 
-/// Loader filter values for a given content kind.
-fn loader_filter(kind: ModKind, loader: LoaderKind) -> Vec<&'static str> {
+/// Loader filter values for a given content kind (best-first).
+fn loader_filter(kind: ModKind, loader: LoaderKind, mc: &str) -> Vec<&'static str> {
     match kind {
-        ModKind::Mod => loader.modrinth_loaders(),
+        ModKind::Mod => loader.modrinth_loaders_for(mc),
         ModKind::Resourcepack => vec!["minecraft"],
         ModKind::Datapack => vec!["datapack"],
         ModKind::Shaderpack => vec![],
@@ -176,7 +176,7 @@ impl Modrinth {
             facets.push(vec![format!("versions:{mc}")]);
         }
         if let Some(l) = f.loader {
-            let ls = loader_filter(kind, l);
+            let ls = loader_filter(kind, l, f.minecraft.as_deref().unwrap_or(""));
             if !ls.is_empty() && kind == ModKind::Mod {
                 facets.push(ls.iter().map(|l| format!("categories:{l}")).collect());
             }
@@ -217,7 +217,7 @@ impl Modrinth {
     ) -> Result<Vec<VersionSummary>> {
         let project = self.project(id).await?;
         let kind = kind_from_project_type(&project.project_type).unwrap_or(ModKind::Mod);
-        let loaders = loader.map(|l| loader_filter(kind, l)).unwrap_or_default();
+        let loaders = loader.map(|l| loader_filter(kind, l, mc.unwrap_or(""))).unwrap_or_default();
         let vs = self.versions(&project.id, mc, &loaders).await?;
         Ok(vs
             .into_iter()
@@ -253,8 +253,15 @@ impl Modrinth {
                     project.title, project.project_type
                 ))
             })?;
-        let loaders = loader_filter(kind, loader);
-        let candidates = self.versions(&project.id, Some(mc), &loaders).await?;
+        let loaders = loader_filter(kind, loader, mc);
+        let mut candidates = self.versions(&project.id, Some(mc), &loaders).await?;
+        // With fallback loaders (Quilt → Fabric, NeoForge 1.20.1 → Forge), prefer builds for the
+        // first loader that has any.
+        if loaders.len() > 1 {
+            if let Some(best) = loaders.iter().find(|l| candidates.iter().any(|v| v.loaders.iter().any(|x| x == *l))) {
+                candidates.retain(|v| v.loaders.iter().any(|x| x == best));
+            }
+        }
         let chosen = if version_spec == "latest" || version_spec.is_empty() {
             pick_latest(&candidates, channel, warnings, &project.title).ok_or_else(|| {
                 Error::Resolve(format!(

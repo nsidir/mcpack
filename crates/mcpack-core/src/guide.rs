@@ -53,7 +53,7 @@ const TOPICS: &[(&str, &str)] = &[
         "workflows",
         "Common workflows (call the tools in this order):
 - Orient: overview — packs, running games, watches, pending restarts, recent errors and suggested next calls.
-- New pack: pack_init name=… minecraft=1.21.1 [loader=fabric] → search_mods query=… pack=… → pack_add pack=… id=<slug> (dependencies are added automatically) → check pack=… → smoke_test pack=… profile=test.
+- New pack: pack_init name=… minecraft=1.21.1 [loader=fabric|quilt|forge|neoforge|vanilla] → search_mods query=… pack=… → pack_add pack=… id=<slug> (dependencies are added automatically) → check pack=… → smoke_test pack=… profile=test.
 - Import/share: import_pack file=x.mrpack|x.zip → … ; export_pack pack=… format=mrpack|curseforge out=….
 - Play/test: launch pack=… [profile] [world=<level id>] (wait=true waits for the title screen) → session_status / logs tail=50 → stop.
 - Something broke: diagnose pack=… (log + crash report → problems with fixes) → doctor pack=… (applies fixes, smoke=true also launches) → check pack=….
@@ -65,7 +65,7 @@ const TOPICS: &[(&str, &str)] = &[
     (
         "pack-settings",
         "pack_set / pack_get / pack_unset paths into pack.toml (comments are kept; invalid results are rejected):
-- pack.name, pack.minecraft, pack.loader.kind (fabric|quilt|vanilla), pack.loader.version (\"latest\" or exact)
+- pack.name, pack.minecraft, pack.loader.kind (fabric|quilt|forge|neoforge|vanilla), pack.loader.version (\"latest\" = recommended/stable, or exact)
 - jvm.memory (\"4G\"), jvm.min_memory, jvm.args ([..]), jvm.game_args, jvm.java (path to a Java), jvm.width, jvm.height
 - options.<key> — options.txt, e.g. options.renderDistance = 12, options.guiScale
 - config.\"<file>\".<key> — patch a mod config (json/toml/properties/txt), e.g. config.\"config/sodium-options.json\".\"quality.weather_quality\" = \"FAST\"
@@ -79,7 +79,7 @@ Global launcher settings (not per pack): config_get / config_set key=curseforge_
         "watch_start pack=… [profile] watches the pack (and local `source = \"file\"` mods) and applies each change to the running game:
 - resource packs / data packs: reloaded live (action live_reload);
 - configs: restart, or live with dev.config_reload = \"resources\" (mods that reload configs with F3+T);
-- a rebuilt mod with dev.hotswap = true (set before launching): changed method bodies are hot-swapped over the JVM debug agent (action hotswapped). New classes, mixins, fabric.mod.json, added/removed mods, or (on a standard JVM) new methods/fields need a restart; hotswap_failed says why;
+- a rebuilt mod with dev.hotswap = true (set before launching): changed method bodies are hot-swapped over the JVM debug agent (action hotswapped). New classes, mixins, mod metadata (fabric.mod.json, mods.toml…), added/removed mods, or (on a standard JVM) new methods/fields need a restart; hotswap_failed says why;
 - anything needing a restart: action restart_needed with restart_reasons (dev.restart = \"ask\", the default) — call restart session=… to apply; with dev.restart = \"auto\" it restarts and rejoins the world (action restarted).
 Read results with watch_events watch=<id> since=<last seq>. hot_apply applies the current state once without watching. A game started by another process cannot be hot-swapped from here.",
     ),
