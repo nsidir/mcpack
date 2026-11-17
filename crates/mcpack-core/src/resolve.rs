@@ -236,7 +236,14 @@ impl<'a> Resolver<'a> {
         // Reuse the previous pin when inputs are unchanged.
         if !self.wants_update(spec) && spec.source != Source::File {
             if let Some(old) = self.old {
-                if let Some(e) = old.entries.iter().find(|e| e.requested_by.contains(&fp)) {
+                let v = spec.version_spec();
+                let pinned = !v.is_empty() && v != "latest";
+                if let Some(e) = old
+                    .entries
+                    .iter()
+                    .find(|e| e.requested_by.contains(&fp))
+                    .filter(|e| !pinned || e.source == Source::File || e.version_id == v || e.version_number == v)
+                {
                     let key = e.key.clone();
                     self.adopt_old(&key).await?;
                     self.mark_requested(&key, &fp);
@@ -260,12 +267,26 @@ impl<'a> Resolver<'a> {
                     }
                 };
                 let mut rv = rv;
+                // An explicit version wins over whatever another mod's dependency walk (or the old
+                // lock's closure) already put under this key; otherwise the pin is silently ignored.
+                let v = spec.version_spec();
+                let mut displaced = Vec::new();
+                if !v.is_empty() && v != "latest" {
+                    let key = format!("{}:{}", rv.source.as_str(), rv.project_id);
+                    if self.entries.get(&key).is_some_and(|e| e.version_id != rv.version_id) {
+                        displaced = self.entries.remove(&key).map(|e| e.requested_by).unwrap_or_default();
+                    }
+                }
                 if spec.deps == Some(false) {
                     rv.required.clear();
                     rv.optional.clear();
                 }
                 let with_optional = spec.optional_deps.unwrap_or(false);
-                self.insert_resolved(rv, with_optional).await?
+                let key = self.insert_resolved(rv, with_optional).await?;
+                for f in displaced {
+                    self.mark_requested(&key, &f);
+                }
+                key
             }
             Source::Url => self.url_entry(spec).await?,
             Source::File => self.file_entry(spec)?,

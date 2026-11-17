@@ -606,7 +606,10 @@ fn single(have: &[u64], have_pre: Option<&str>, c: &str) -> Option<bool> {
         return Some(have.len() >= prefix.len() && have[..prefix.len()] == prefix[..]);
     }
     let want = parse_ver(rest)?;
-    let o = cmp_ver(have, &want).then_with(|| cmp_pre(have_pre, pre_release(rest)));
+    // A trailing `-` (`>=2.2.4-`) is Fabric's idiom for "including pre-releases": an empty
+    // pre-release that sorts below every other one, so keep it rather than reading a release.
+    let want_pre = pre_release(rest).or_else(|| rest.split('+').next().filter(|v| v.ends_with('-')).map(|_| ""));
+    let o = cmp_ver(have, &want).then_with(|| cmp_pre(have_pre, want_pre));
     Some(match op {
         ">=" => o != Less,
         "<=" => o != Greater,
@@ -690,6 +693,11 @@ mod tests {
         assert_eq!(version_matches("1.0.0-beta.2", &s(&[">=1.0.0-beta.10"])), Some(false));
         assert_eq!(version_matches("1.0.0", &s(&["^0.4.3"])), Some(false));
         assert_eq!(version_matches("1.21.1", &s(&["1.21-alpha.24.1.a"])), Some(false));
+        // Trailing `-` admits pre-releases of that version (Wilder Wild -> frozenlib >=2.2.4-).
+        assert_eq!(version_matches("2.2.4-mc1.21.1", &s(&[">=2.2.4-"])), Some(true));
+        assert_eq!(version_matches("2.2.4", &s(&[">=2.2.4-"])), Some(true));
+        assert_eq!(version_matches("2.2.3-mc1.21.1", &s(&[">=2.2.4-"])), Some(false));
+        assert_eq!(version_matches("2.2.4-mc1.21.1", &s(&[">=2.2.4"])), Some(false));
     }
 
     #[test]
